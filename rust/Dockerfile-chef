@@ -1,0 +1,14 @@
+ARG RUST_VERSION=1.75.0
+
+FROM rust:$RUST_VERSION-slim
+
+RUN apt-get update && apt-get install --no-install-recommends -y wget && rm -rf /var/lib/apt/lists/* && \
+  # cargo-chef
+  wget https://github.com/LukeMathWalker/cargo-chef/releases/download/v0.1.62/cargo-chef-x86_64-unknown-linux-gnu.tar.gz -O - | \
+  tar -xzvf - -C /usr/local/bin && \
+  # Mold
+  wget https://github.com/rui314/mold/releases/download/v2.3.3/mold-2.3.3-x86_64-linux.tar.gz -O - | \
+  tar -xzvf - -C /usr/local/ --strip-components 1 && \
+  ln -s /usr/local/bin/mold /usr/bin/ld.lld
+
+ENV RUSTFLAGS='-C link-arg=-fuse-ld=lld'

@@ -1,0 +1,7 @@
+ARG RUST_VERSION=1.75.0
+
+FROM rust:$RUST_VERSION-alpine3.18
+
+RUN apk add --no-cache mold mingw-w64-gcc musl-dev openssl-dev zip wget && \
+  rustup target add x86_64-pc-windows-gnu
+
