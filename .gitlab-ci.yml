@@ -9,13 +9,19 @@ workflow:
       when: never
     - when: always
 
+dummy:
+  image: alpine:3.18
+  script:
+    - echo "dummy job"
+
 image:rust-ci: &job
   image:
-    name: gcr.io/kaniko-project/executor:v1.11.0-debug
+    name: gcr.io/kaniko-project/executor:v1.22.0-debug
     entrypoint: [""]
   variables:
-    DOCKERFILE: Dockerfile
     IMAGE: $CI_REGISTRY_IMAGE/rust
+    D_CONTEXT: rust
+    D_FILE: Dockerfile
   before_script:
     - auth=$(echo -n "$CI_REGISTRY_USER:$CI_REGISTRY_PASSWORD" | base64)
     - 'echo "{\"auths\": {\"$CI_REGISTRY\": {\"auth\": \"$auth\"}}}" > /kaniko/.docker/config.json'
@@ -23,37 +29,36 @@ image:rust-ci: &job
     - '[ "$CI_COMMIT_REF_NAME" != "$CI_DEFAULT_BRANCH" ] && dry=--no-push'
     - >-
       /kaniko/executor $dry
-      --context rust
-      --dockerfile $DOCKERFILE
+      --context $D_CONTEXT
+      --dockerfile $D_FILE
       --destination $IMAGE:$RUST_VERSION
       --build-arg RUST_VERSION=$RUST_VERSION
-  # rules:
-  #   - changes:
-  #       - $DOCKERFILE
+  rules:
+    - changes: [$D_CONTEXT/$D_FILE]
 
 image:rust-ci:alt-target:
   <<: *job
   variables:
-    DOCKERFILE: Dockerfile-other
     IMAGE: $CI_REGISTRY_IMAGE/rust/alt-target
+    D_FILE: Dockerfile-other
 
 image:rust-chef:
   <<: *job
   variables:
-   DOCKERFILE: Dockerfile-chef
    IMAGE: $CI_REGISTRY_IMAGE/rust/chef
+   D_FILE: Dockerfile-chef
 
 image:go-ci:
   <<: *job
   variables:
     IMAGE: $CI_REGISTRY_IMAGE/golang
-    DOCKERFILE: Dockerfile
+    D_CONTEXT: golang
   script:
     - '[ "$CI_COMMIT_REF_NAME" != "$CI_DEFAULT_BRANCH" ] && dry=--no-push'
     - >-
       /kaniko/executor $dry
-      --context golang
-      --dockerfile $DOCKERFILE
+      --context $D_CONTEXT
+      --dockerfile $D_FILE
       --destination $IMAGE:$GO_VERSION
       --build-arg GO_VERSION=$GO_VERSION
 
@@ -74,3 +79,5 @@ template-check:
       jq '.' output.json &&
       jq -e '.valid' output.json
       ; done
+  rules:
+    - changes: [ '**/*.gitlab-ci.yml' ]

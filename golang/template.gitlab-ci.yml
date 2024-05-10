@@ -1,7 +1,6 @@
 include:
   - project: chrisss93/ci
     file: docker.gitlab-ci.yml
-    ref: init
 
 variables:
   GO_VERSION: '1.20'

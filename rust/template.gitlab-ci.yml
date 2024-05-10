@@ -16,7 +16,6 @@
 include:
   - project: chrisss93/ci
     file: docker.gitlab-ci.yml
-    ref: init
 
 variables:
   RUST_VERSION: 1.75.0
