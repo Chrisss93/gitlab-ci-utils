@@ -1,0 +1,379 @@
+include:
+  - project: chrisss93/ci
+    file: docker.gitlab-ci.yml
+    ref: init
+
+variables:
+  GO_VERSION: '1.20'
+  JOB_IMAGE: registry.gitlab.com/chrisss93/ci/golang:$GO_VERSION # golang:$GO_VERSION-alpine3.18
+  GO_LDFLAGS: '-s -w'
+  GOPATH: $CI_PROJECT_DIR/.go
+  ALLOWED_LICENSES: MIT,Apache-2.0,BSD-3-Clause,BSD-2-Clause
+
+default:
+  image: $JOB_IMAGE
+  cache:
+    key: $CI_PROJECT_PATH-go-deps
+    paths:
+      - $GOPATH/pkg/mod/cache
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == 'push' && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - when: always
+
+stages:
+  - check
+  - test
+  - build
+  - deploy
+
+.setup:
+  stage: .pre
+  image: registry.gitlab.com/gitlab-ci-utils/curl-jq:1.1.0
+  script:
+    - >-
+      git clone --depth 1 --single-branch --branch main
+      https://gitlab-ci-token:$CI_JOB_TOKEN@$CI_SERVER_HOST/chrisss93/ci.git
+      /tmp/ci
+    - cp -n /tmp/ci/golang/.golangci.yml .
+  artifacts:
+    paths:
+      - $CI_PROJECT_DIR/.golangci.yml
+    expire_in: 1 hour
+
+lint:
+  stage: check
+  before_script:
+    - mkdir -p $GOPATH/bin
+    - >-
+      which golangci-lint || (
+      wget https://github.com/golangci/golangci-lint/releases/download/v1.55.2/golangci-lint-1.55.2-linux-amd64.tar.gz
+      -O - | tar xzvf - -C $GOPATH/bin --strip-components 1 golangci-lint-1.55.2-linux-amd64/golangci-lint &&
+      ln -s $GOPATH/bin/golangci-lint /usr/local/bin/golangci-lint
+      )
+  script:
+    - >-
+      golangci-lint run
+      --issues-exit-code 222
+      --timeout 3m
+      --print-issued-lines=false
+      --out-format code-climate:code-climate.json,line-number
+  artifacts:
+    when: always
+    reports:
+      codequality: code-climate.json
+  allow_failure:
+    exit_codes: [222]
+  cache: &go-bin-cache
+    key: $CI_PROJECT_PATH-go-bin
+    paths:
+      - $GOPATH/bin
+
+# govulncheck is able to go beyond most analyzers and detect not only if a vulnerable dependency is being imported,
+# but also if the specific code-path to the vulnerability is being used. If there are no code-paths to that
+# vulnerability, it is considered Low severity and will not be noted in the code-quality report.
+dep-check:
+  stage: check
+  variables:
+    CODE_CLIMATE: |-
+      map(select(.vulnerability != null) | .vulnerability | .osv as $$osv | .modules[] |
+      .packages[0].callstacks[0].frames[0].position as $$pos | select($$pos != null) | [{
+      "location": {"path": $$pos.filename, "lines": {"begin": $$pos.line, "end": $$pos.line}},
+      "description": "Detected vulnerability \($$osv.id) for \(.path)@\(.found_version): \($$osv.details)",
+      "fingerprint": ($$osv.id + $$pos.filename + ($$pos.line | tostring)) | @base64,
+      "check_name": "govulncheck",
+      "severity": "blocker",
+      "categories": ["Security"],
+      "type": "issue"
+      }]) | flatten
+    SCANNER: >-
+      {"id": "govulncheck", "name": "govulncheck", "version": "1.0.1", "vendor": {"name": "golang"},
+      "url": "https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck"}
+    # https://gitlab.com/gitlab-org/security-products/security-report-schemas/-/blob/v15.0.6/dist/dependency-scanning-report-format.json
+    DEP_SCAN: |-
+      {
+        "version": "15.0.6",
+        "vulnerabilities": map(select(.vulnerability != null) | .vulnerability | .osv as $$osv | .modules[] | {
+          "id": ($$osv.id + .path + .found_version) | @base64,
+          "name": ($$osv.id + .path + .found_version),
+          "description": "Detected vulnerability \($$osv.id) for \(.path)@\(.found_version): \($$osv.details)",
+          "severity": (if .package.callstacks == null then "Low" else "Critical" end),
+          "location": {"file": "go.mod", "dependency": {"version": .found_version, "package": {"name": .path}}},
+          "solution": $$osv.affected | map(.package.name as $$pkg | .ranges[].events[] |
+            if first(.fixed | select(. != null)) != null then "upgrade \($$pkg) to \(.fixed)"
+            elif first(.introduced | select(. != null)) != "0" then "downgrade \($$pkg) to \(.introduced)"
+            else "remove \($$pkg)" end) | join(" and "),
+          "identifiers": ($$osv.aliases + [$$osv.id] | map({
+            "name": ., "value": .,
+            "type": . | sub("-.+"; "") | ascii_downcase,
+            "url": (. | 
+              if startswith("GO-") then "https://pkg.go.dev/vuln/\(.)"
+              elif startswith("CVE-") then "https://www.cve.org/CVERecord?id=\(.)"
+              elif startswith("GHSA-") then "https://github.com/advisories/\(.)"
+              else null end)
+          }))
+        }),
+        "dependency_files": [{
+          "path": "go.mod", "package_manager": "go modules",
+          "dependencies": map(select(.vulnerability != null) | .vulnerability.modules[] | 
+            {"package": {"name": .path}, "version": .found_version})
+        }],
+        "scan": {
+          "type": "dependency_scanning",
+          "status": (if [. | select(.[].vulnerability != null)] | length > 0 then "failure" else "success" end),
+          "start_time": $$start, "end_time": now | strftime("%Y-%m-%dT%H:%M:%S"),
+          "analyzer": $$SCANNER, "scanner": $$SCANNER
+        }
+      }
+  before_script:
+    - mkdir -p $GOPATH/bin
+    - >-
+      which govulncheck || (
+      GOPATH=/go go install govulncheck@v1.1.0 &&
+      mv /go/bin/govulncheck $CI_PROJECT_DIR/.go/bin/govulncheck &&
+      ln -s $CI_PROJECT_DIR/.go/bin/govulncheck /usr/local/bin/govulncheck
+      )
+    - which jq || apk add --no-cache jq
+  script:
+    - start=$(date -u +'%Y-%m-%dT%H:%M:%S')
+    - govulncheck -json -test ./... > raw.json
+    - jq -s "$CODE_CLIMATE" raw.json > govulncheck.json
+    # - jq -s --arg start $start "$DEP_SCAN" raw.json > govulncheck-scan.json
+    - '[ -s govulncheck.json ] && jq -e "length > 0" govulncheck.json && govulncheck -test ./...'
+  artifacts:
+    when: always
+    reports:
+      codequality: govulncheck.json
+      # dependency_scanning: govulncheck-scan.json
+  allow_failure:
+    exit_codes: [3]
+  cache: *go-bin-cache
+
+
+dep-licenses:
+  stage: check
+  before_script:
+    - >-
+      which go-licenses || (
+      GOPATH=/go go install github.com/google/go-licenses@v1.6.0 &&
+      mv /go/bin/go-licenses $CI_PROJECT_DIR/.go/bin &&
+      ln -s $CI_PROJECT_DIR/.go/bin/go-licenses /usr/local/bin/go-licenses
+      )
+    - which jq || apk add --no-cache jq
+    - |-
+      cat <<'EOF' > codeclimate.awk
+      FNR == NR {
+          if ($0 ~ /Not allowed license (.+) found for library (.+)/) {
+              lib = gensub(/.*library ([^ ]+).*/, "\\1", 1)
+              license = gensub(/.*license (.+?) found.*/, "\\1", 1)
+              pkgs[lib] = license
+          }
+      }
+
+      FNR != NR {
+          for (lib in pkgs) {
+              if (index($0, lib)) {
+                  license = pkgs[lib]
+                  fingerprint = license lib
+                  gsub(/[^[:alnum:]]/, "", fingerprint)
+                  printf "{\"description\": \"Dependency: %s has forbidden license: %s\","\
+                         " \"location\": { \"path\":  \"%s\", \"lines\": {\"begin\": %d, \"end\": %d}},"\
+                         " \"fingerprint\": \"%s\","\
+                         " \"severity\": \"major\", \"check_name\": \"go-license: %s\", \"type\": \"issue\"}\n"\
+                         , lib, license, FILENAME, FNR, FNR, fingerprint, license
+              }
+          }
+      } 
+      EOF
+  script:
+    - set -e
+    - go-licenses check ./... --allowed_licenses $ALLOWED_LICENSES 2> license-check.txt || true
+    - awk -f codeclimate.awk license-check.txt go.mod | jq -s > license-codeclimate.json
+    - |-
+      if [ -s license-codeclimate.json ] && jq -e 'length > 0' license-codeclimate.json
+      then cat license-check.txt; exit 222
+      fi
+  artifacts:
+    when: always
+    reports:
+      codequality: license-codeclimate.json
+#      dependency_scanning: license-depscan.json
+  allow_failure:
+    exit_codes: [222]
+  cache: *go-bin-cache
+
+
+unit-tests:
+  stage: test
+  variables:
+    GO_JUNIT_URL: https://github.com/jstemmer/go-junit-report/releases/download
+    GO_COV_REPORT_URL: https://github.com/matm/gocov-html/releases/download
+  before_script:
+    - mkdir -p $GOPATH/bin
+    - >-
+      which go-junit-report || (
+      wget -O - $GO_JUNIT_URL/v2.0.0/go-junit-report-v2.1.0-linux-amd64.tar.gz | tar xzv - -C $GOPATH/bin &&
+      ln -s $GOPATH/bin/go-junit-report /usr/local/bin/go-junit-report
+      )
+    - >-
+      which gocov || (
+      GOPATH=/go go install github.com/axw/gocov/gocov@v1.1.0 &&
+      mv /go/bin/gocov $CI_PROJECT_DIR/.go/bin &&
+      ln -s $CI_PROJECT_DIR/.go/bin/gocov /usr/local/bin/gocov
+      )
+    - >-
+      which gocov-html || (
+      wget -O - $GO_COV_REPORT_URL/v1.4.0/gocov-html-v1.4.0-linux-amd64.zip | unzip - &&
+      mv gocov-html/gocov-html $GOPATH/bin
+      ln -s $GOPATH/bin/gocov-html /usr/local/bin/gocov-html
+      )
+    - >-
+      which gocov-xml || (
+      GOPATH=/go go install github.com/AlekSi/gocov-xml@v1.1.0 &&
+      mv /go/bin/gocov-xml $CI_PROJECT_DIR/.go/bin/gocov-xml &&
+      ln -s $CI_PROJECT_DIR/.go/bin/gocov-xml /usr/local/bin/gocov-xml
+      )
+  script:
+    - go test -coverprofile=c.out -v ./... | tee test.txt
+    - go-junit-report --set-exit-code --in test.txt > junit.xml
+  after_script:
+    - |-
+      if [ -s "c.out" ]; then
+      gocov convert c.out | gocov-xml > coverage.xml
+      gocov convert c.out | gocov-html -t kit > coverage.html
+      gocov convert c.out | gocov report
+      fi
+  coverage: '/^Total Coverage: [1-9]\d*(?:\.\d+)?% \(\d+/\d+\)$/'
+  dependencies: []
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - coverage.html
+
+
+.integration-tests:
+  extends: unit-tests
+  variables:
+    BUILD_TAG: integration
+  services:
+    - name: docker:dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+  script:
+    - go test -coverprofile=c.out -v -tags $BUILD_TAG ./... | tee test.txt
+    - go-junit-report --set-exit-code --in test.txt > junit.xml
+
+
+compile:
+  stage: build
+  before_script:
+    - which zip || apk add --no-cache zip
+  script:
+    - CGO_ENABLED=0 go build -ldflags "$GO_LDFLAGS" -o binaries/app ./....
+    - |-
+      if [ "$GOOS" == "windows" ]
+      then zip binaries/$GOOS-$GOARCH.zip binaries/app
+      else tar czvf binaries/$GOOS-$GOARCH.tar.gz binaries/app
+      fi
+    - '[ -z "$CI_COMMIT_TAG" ] && exit 0'
+    - url=$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/binary/${CI_COMMIT_TAG#v}/$GOOS-$GOARCH
+    - 'wget "$url" -S -O - --header "JOB-TOKEN: $CI_JOB_TOKEN" --method PUT --body-file binaries/$GOOS-$GOARCH.*'
+    - mkdir -p assets
+    - |-
+      cat <<EOF > assets/$GOOS-$GOARCH.json
+        {
+          "name": "Binary ($GOOS-$GOARCH)",
+          "url": "$url",
+          "direct_asset_path": "$(ls binaries/*)"
+        }
+      EOF
+  parallel:
+    matrix:
+      - GOARCH: [amd64]
+        GOOS: [linux] #, windows, darwin]
+  artifacts:
+    paths:
+      - binaries/$GOOS-$GOARCH.*
+      - assets/$GOOS-$GOARCH.json
+  dependencies: []
+
+
+pages:
+  stage: .post
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    ASSETS: |-
+      [
+        {
+          "name": "Documentation",
+          "link_type": "runbook",
+          "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/docs.tar.gz"
+        },
+        {
+          "name": "Test coverage report",
+          "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/public/coverage.html"
+        },
+        {
+          "name": "Third party licenses",
+          "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/public/licences.html"
+        }
+      ]
+  before_script:
+    - >-
+      which gopages || (
+      GOPATH=/go go install github.com/johnstarich/go/gopages@v0.1.25 &&
+      mv /go/bin/gopages $CI_PROJECT_DIR/.go/bin &&
+      ln -s $CI_PROJECT_DIR/.go/bin/gopages /usr/local/bin/gopages
+      )
+  script:
+    - 'echo "Creating gitlab release: ${CI_COMMIT_TAG#v}"'
+    - apk add --no-cache wget
+    - mkdir -p public
+    - >-
+      gopages
+      --out public/docs
+      --source-link $CI_PROJECT_URL/blob/$CI_COMMIT_TAG/{{.Path}}{{if .Line}}#L{{.Line}}{{end}}
+    - tar czvf docs.tar.gz public/docs
+    - >-
+      jq -s --arg tag "${CI_COMMIT_TAGs#v}" --argjson assets "$ASSETS" '
+      {
+        "name": "$tag",
+        "tag_name": "$CI_COMMIT_TAG",
+        "description": "Triggered by git tag: $CI_COMMIT_TAG - $CI_COMMIT_TAG_MESSAGE",
+        "assets": {"links": (. + $assets)}
+      }' assets/*.json > release.json
+    - >-
+      wget -S -O - $CI_API_V4_URL/projects/$CI_PROJECT_ID/releases
+      --header "JOB-TOKEN: $CI_JOB_TOKEN"
+      --header 'Content-Type: application/json'
+      --method POST --body-file release.json
+    - echo "Setting up Pages"
+    - mv coverage.html public/coverage.html
+    - >-
+      sed "
+      s|__STUB_NAME__|$CI_PROJECT_NAME|g;
+      s|__STUB_VERSION__|${CI_COMMIT_TAG#v}|g;
+      s|__STUB_PIPELINE_ID__|$CI_PIPELINE_ID|g;
+      s|__STUB_SOURCE_URL__|$CI_PROJECT_URL|g;
+      s|__STUB_RELEASE_URL__|$CI_PROJECT_URL/-/releases/${CI_COMMIT_TAG#v}|g;
+      s|__STUB_PIPELINE_URL__|$CI_PIPELINE_URL|g;
+      s|__STUB_DOC_URL__|docs/app|g;
+      s|__STUB_LICENSE_URL__|licenses.html|g;
+      s|__STUB_COVERAGE_URL__|coverage.html|e;"
+      .goconf/index.html > public/index.html
+  artifacts:
+    paths:
+      - public
+      - docs.tar.gz
+  cache: *go-bin-cache

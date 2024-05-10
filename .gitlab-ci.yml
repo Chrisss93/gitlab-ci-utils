@@ -1,0 +1,76 @@
+variables:
+  RUST_VERSION: 1.75.0
+  GO_VERSION: '1.20'
+  IMAGE: $CI_REGISTRY_IMAGE
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == 'push' && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - when: always
+
+image:rust-ci: &job
+  image:
+    name: gcr.io/kaniko-project/executor:v1.11.0-debug
+    entrypoint: [""]
+  variables:
+    DOCKERFILE: Dockerfile
+    IMAGE: $CI_REGISTRY_IMAGE/rust
+  before_script:
+    - auth=$(echo -n "$CI_REGISTRY_USER:$CI_REGISTRY_PASSWORD" | base64)
+    - 'echo "{\"auths\": {\"$CI_REGISTRY\": {\"auth\": \"$auth\"}}}" > /kaniko/.docker/config.json'
+  script:
+    - '[ "$CI_COMMIT_REF_NAME" != "$CI_DEFAULT_BRANCH" ] && dry=--no-push'
+    - >-
+      /kaniko/executor $dry
+      --context rust
+      --dockerfile $DOCKERFILE
+      --destination $IMAGE:$RUST_VERSION
+      --build-arg RUST_VERSION=$RUST_VERSION
+  # rules:
+  #   - changes:
+  #       - $DOCKERFILE
+
+image:rust-ci:alt-target:
+  <<: *job
+  variables:
+    DOCKERFILE: Dockerfile-other
+    IMAGE: $CI_REGISTRY_IMAGE/rust/alt-target
+
+image:rust-chef:
+  <<: *job
+  variables:
+   DOCKERFILE: Dockerfile-chef
+   IMAGE: $CI_REGISTRY_IMAGE/rust/chef
+
+image:go-ci:
+  <<: *job
+  variables:
+    IMAGE: $CI_REGISTRY_IMAGE/golang
+    DOCKERFILE: Dockerfile
+  script:
+    - '[ "$CI_COMMIT_REF_NAME" != "$CI_DEFAULT_BRANCH" ] && dry=--no-push'
+    - >-
+      /kaniko/executor $dry
+      --context golang
+      --dockerfile $DOCKERFILE
+      --destination $IMAGE:$GO_VERSION
+      --build-arg GO_VERSION=$GO_VERSION
+
+# ci_lint_key variable holds a personal access token to interact with Gitlab's ci/lint API.
+# That API doesn't seem to respond to regular job-tokens for authorization and even if it did
+# this is not one of the hard-coded APIs accessible by the job-token. Wait for:
+# https://gitlab.com/groups/gitlab-org/-/epics/3559
+template-check:
+  image: registry.gitlab.com/gitlab-ci-utils/curl-jq:1.1.0
+  script:
+    - >-
+      for pipeline in **/*.gitlab-ci.yml; do
+      echo "Valiating: $pipeline" &&
+      jq --null-input --arg yaml "$(<$pipeline)" '.content=$yaml' |
+      curl -s $CI_API_V4_URL/projects/$CI_PROJECT_ID/ci/lint -X POST -d @-
+      -H "PRIVATE-TOKEN: $ci_lint_key" -H 'Content-Type: application/json' |
+      jq 'del(.merged_yaml)' > output.json &&
+      jq '.' output.json &&
+      jq -e '.valid' output.json
+      ; done

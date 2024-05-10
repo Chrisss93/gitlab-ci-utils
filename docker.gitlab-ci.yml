@@ -1,0 +1,105 @@
+# To enable building a docker-image for the project, a Dockerfile must exist in the project root. If the
+# Dockerfile is not in the project root, the Dockerfile and the docker context can be specified by setting
+# the variables DOCKER_FILE and DOCKER_CONTEXT. To publish the image to a docker registry other than
+# Gitlab's own container registry, provide an IMAGE variable and modify the before_script clause of the
+# docker-image job to provide docker registry credentials for the registry of your choosing.
+# By default, the docker image will be built on all commits to the default branch, on git tags, and on 
+# commits to any git branches with open MRs.
+
+variables:
+  DOCKER_FILE:
+  DOCKER_CONTEXT:
+  CACHE_CLEANUP_PATHS:
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == 'push' && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - when: always
+
+
+# To push to docker registries other than gitlab, one can extend this job, define the IMAGE variable
+# corresponding to the full image name for the targeted registry and replace the before_script section
+# with a custom way to write the /kaniko/.docker/config.json file.  For registries like AWS ECR and ACR
+# this may be assisted with their respective docker-credentials-helper binaries.
+docker-image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.22.0-debug
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_MERGE_REQUEST_ID || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - Dockerfile
+        - $DOCKER_FILE
+  before_script:
+    - auth=$(echo -n "${REGISTRY_USER:-$CI_REGISTRY_USER}:${REGISTRY_PASSWORD:-$CI_REGISTRY_PASSWORD}" | base64)
+    - 'echo "{\"auths\": {\"$CI_REGISTRY\": {\"auth\": \"$auth\"}}}" > /kaniko/.docker/config.json'
+  script:
+    - if [ -z "$CI_COMMIT_TAG" ]; then tag=dev-$CI_COMMIT_REF_NAME; else tag=${CI_COMMIT_TAG#v}; fi
+    - if [ "$tag" == "dev-main" ]; then tag=latest; fi
+    - >-
+      /kaniko/executor --cache
+      --context $CI_PROJECT_DIR/$DOCKER_CONTEXT
+      --dockerfile $CI_PROJECT_DIR/${DOCKER_FILE:-Dockerfile}
+      --destination ${IMAGE:-$CI_REGISTRY_IMAGE}:$tag
+  dependencies: []
+  environment:
+    name: dev-$CI_COMMIT_REF_NAME
+    on_stop: cleanup
+
+
+# To cleanup docker images in registries other than gitlab, one can replace this job
+# and modify the before_script to define a custom way to retrieve and set the "token"
+# environment variable necessary to authenticate with the chosen docker registry.
+cleanup:
+  stage: .post
+  image: registry.gitlab.com/gitlab-ci-utils/curl-jq:1.1.0
+  rules:
+    - if: $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH
+      exists:
+        - Dockerfile
+        - $DOCKER_FILE
+      when: manual
+    - if: $CI_COMMIT_TAG
+      when: never
+  environment:
+    name: dev-$CI_COMMIT_REF_NAME
+    action: stop
+  allow_failure: true
+  before_script:
+    - img=${IMAGE:-$CI_REGISTRY_IMAGE} img_name=${img#*/} img_repo=${img%%/*}
+    - >-
+      token=$(
+      curl -L -u $CI_REGISTRY_USER:$CI_REGISTRY_PASSWORD
+      $CI_SERVER_URL/jwt/auth?service=container_registry&scope=repository:$img_name:pull,delete |
+      jq -r '.token')
+  script:
+    - 'echo "Clearing caches: $CACHE_CLEANUP_PATHS"'
+    - rm -rf $CACHE_CLEANUP_PATHS
+    - if [ -z "$CI_COMMIT_TAG" ]; then img_tag=dev-$CI_COMMIT_REF_NAME; else img_tag=${CI_COMMIT_TAG#v}; fi
+    - if [ "$img_tag" == "dev-main" ]; then img_tag=latest; fi
+    - 'echo "Removing image: $img:$img_tag"'
+    - >-
+      manifest=$(
+      curl -L -I
+      -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json'
+      -H "Authorization: Bearer $token"
+      https://$img_repo/v2/$img_name/manifests/$img_tag |
+      awk 'tolower($1) == "docker-content-digest:" { print $2 }'
+      )
+
+    # Try Docker Registry V2 Spec API
+    - >-
+      curl -L --fail-with-body -X DELETE
+      -H "Authorization: Bearer $token"
+      https://$img_repo/v2/$img_name/manifests/$manifest && exit 0
+
+    # Try custom Gitlab Container Registry endpoint
+    - >-
+      curl -L --fail-with-body -X DELETE
+      -H "Authorization: Bearer $token"
+      -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json'
+      https://$img_repo/v2/$img_name/tags/reference/$img_tag && exit 0
+
+  dependencies: []
