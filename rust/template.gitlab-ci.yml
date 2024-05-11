@@ -141,8 +141,7 @@ rustfmt:
       codequality: rustfmt.json
     expire_in: 1 week
   allow_failure:
-    exit_codes:
-      - 222
+    exit_codes: [222]
   cache: []
 
 # The two dependency-* jobs below expose their outputs as both code-quality and dependency-scanning reports
@@ -228,7 +227,7 @@ dep-check:
     # - jq -s --arg start $start --argjson deps "$(<meta.json)" $DEP_SCAN deny.json > deny-depscan.json
     - |-
       if [ -s deny-codeclimate.json ] && jq -e 'length > 0' deny-codeclimate.json
-      then cargo deny --all-features --locked --color always check --exclude-dev --show-stats
+      then cargo deny --all-features --locked --color always check --exclude-dev --show-stats || exit 222
       fi
   after_script:
     - rm -f deny.json patched.json meta.json
@@ -239,7 +238,7 @@ dep-check:
       # dependency_scanning: deny-depscan.json
     expire_in: 1 week
   allow_failure:
-    exit_codes: [5]
+    exit_codes: [222]
   cache: &cargo-bin-cache
     key: $CI_PROJECT_PATH-cargo-binstall
     paths:
@@ -446,7 +445,7 @@ compile:linux-gnu: &compile
 
 compile:linux-musl:
   <<: *compile
-  image: registry.gitlab.com/chrisss93/rust-ci/alt-target:$RUST_VERSION
+  image: registry.gitlab.com/chrisss93/ci/rust/alt-target:$RUST_VERSION
   variables:
     CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
     RUSTFLAGS: -C link-arg=-fuse-ld=mold -C target-feature=-crt-static
@@ -454,7 +453,7 @@ compile:linux-musl:
 
 compile:windows:
   <<: *compile
-  image: registry.gitlab.com/chrisss93/rust-ci/alt-target:$RUST_VERSION
+  image: registry.gitlab.com/chrisss93/ci/rust/alt-target:$RUST_VERSION
   variables:
     CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
     RUSTFLAGS: -C linker=x86_64-w64-mingw32-gcc -C ar=/usr/x86_64-w64-mingw32/bin/ar
