@@ -14,7 +14,7 @@ dummy:
   script:
     - echo "dummy job"
 
-image:rust-ci: &job
+image:rust-ci:
   image:
     name: gcr.io/kaniko-project/executor:v1.22.0-debug
     entrypoint: [""]
@@ -29,27 +29,30 @@ image:rust-ci: &job
     - '[ "$CI_COMMIT_REF_NAME" != "$CI_DEFAULT_BRANCH" ] && dry=--no-push'
     - >-
       /kaniko/executor $dry
-      --context $D_CONTEXT
-      --dockerfile $D_FILE
+      --context=$D_CONTEXT
+      --dockerfile=$D_FILE
       --destination $IMAGE:$RUST_VERSION
       --build-arg RUST_VERSION=$RUST_VERSION
   rules:
-    - changes: [$D_CONTEXT/$D_FILE]
+    - exists:
+        - $D_CONTEXT/$D_FILE
+      changes:
+        - $D_CONTEXT/$D_FILE
 
 image:rust-ci:alt-target:
-  <<: *job
+  extends: image:rust-ci
   variables:
     IMAGE: $CI_REGISTRY_IMAGE/rust/alt-target
     D_FILE: Dockerfile-other
 
 image:rust-chef:
-  <<: *job
+  extends: image:rust-ci
   variables:
    IMAGE: $CI_REGISTRY_IMAGE/rust/chef
    D_FILE: Dockerfile-chef
 
 image:go-ci:
-  <<: *job
+  extends: image:rust-ci
   variables:
     IMAGE: $CI_REGISTRY_IMAGE/golang
     D_CONTEXT: golang
@@ -57,8 +60,8 @@ image:go-ci:
     - '[ "$CI_COMMIT_REF_NAME" != "$CI_DEFAULT_BRANCH" ] && dry=--no-push'
     - >-
       /kaniko/executor $dry
-      --context $D_CONTEXT
-      --dockerfile $D_FILE
+      --context=$D_CONTEXT
+      --dockerfile=$D_FILE
       --destination $IMAGE:$GO_VERSION
       --build-arg GO_VERSION=$GO_VERSION
 
