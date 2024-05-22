@@ -33,9 +33,11 @@ setup:
         curl -L https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64.tar.gz | tar xzv &&
         mv yq_linux_amd64 /usr/local/sbin/yq
       )
+    - mkdir applicable_plugins
     - |-
-      for PLUGIN in $PLUGINS
-      do yq -p xml -e "$PLUGIN_FOUND" full-pom.xml && touch applicable_plugins/.$PLUGIN
+      for PLUGIN in $PLUGINS; do
+      yq -p xml -eoy "(.project.build.plugins.plugin[] | select(.artifactId == \"$PLUGIN\"))" full-pom.xml && \
+      touch applicable_plugins/.$PLUGIN || true
       done
   artifacts:
     paths:
@@ -65,7 +67,7 @@ pmd:
       )),
       "type": "issue", "categories": ["Clarity"]
       })
-    VALIDATE_EXPR: . | length > 0
+    ISSUES_EXPR: . | length > 0
   rules:
     - exists:
         - applicable_plugins/$PLUGIN
@@ -73,7 +75,7 @@ pmd:
     - yq -p xml -o xml -i "${PLUGIN_EXISTS}.configuration |= . * $PLUGIN_CONFIG" full-pom.xml
     - mvn -f full-pom.xml $GOAL $EXTRA_OPTS
     - yq -p ${REPORT##*.} -o $ARTIFACT_EXT "$YQ_EXPR" $REPORT > report.json
-    - if [ -s report.json ] && yq -e "$VALIDATE_EXPR" report.json && exit 222
+    - if [ -s report.json ]; then yq -eoy "$ISSUES_EXPR" report.json && exit 222 || true; fi
   artifacts:
     paths:
       - site/**
@@ -148,7 +150,7 @@ oss-index:
       "location": ( .pkg | capture("$PKG_REGEX") | {"dependency": {"version": .v, "package": {"name": .p}}} )
       })
       }
-    VALIDATE_EXPR: .vulnerabilities | length > 0
+    ISSUES_EXPR: .vulnerabilities | length > 0
   artifacts:
     reports:
       dependency_scanning: report.json
@@ -239,7 +241,7 @@ coverage:
       "fileSets": {"fileSet": {"directory": "target/jacoco", "include": "*.exec"}} 
       }
     ARTIFACT_EXT: xml
-    VALIDATE_EXPR: false
+    ISSUES_EXPR: false
     ATTRS: >-
       "+@line-rate": .counter | filter(.+@type == "LINE") | .[] |
         (.+@covered | to_number) / ((.+@missed | to_number) + (.+@covered | to_number)),
