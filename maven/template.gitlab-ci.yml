@@ -30,7 +30,7 @@ setup:
     - mvn help:effective-pom -Doutput=full-pom.xml
     - &install-yq >-
       which yq || (
-        curl -L https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64.tar.gz | tar xzvf &&
+        curl -L https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64.tar.gz | tar xzv &&
         mv yq_linux_amd64 /usr/local/sbin/yq
       )
     - |-
