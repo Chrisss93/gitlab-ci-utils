@@ -13,6 +13,23 @@
 # change parts of the pipeline jobs (ie. if your nextest.toml file is configured to save the junit file to
 # some different location).
 
+# This pipeline provides the option to cache certain compiled artifacts of crate dependencies. This should allow
+# cargo to avoid re-compiling these dependencies for future builds of this pipeline.  The choice of which dependencies
+# to artifact will be project specific.  The relevant jobs provide cargo-timings.html artifacts to help guide this
+# decision but some trial and error is required to see which dependencies slow down the build the most and how large
+# their compiled artifacts are.  Note: compilation is a complex beast - just because cargo timings shows the crate A
+# dependency takes 15 seconds compile doesn't mean the build will speed up by a commensurate amount if you choose to 
+# cache A.
+
+# TODO
+# * Test to see if this generalizes to multi-package workspace projects
+# * Remove dumb restriction that a project's binary must be exactly named "app"
+# ✓ Test cache-crates.sh to make sure the logic works as intended
+# * Complete the benchmark job (target the load_testing report artifact)
+# * Should we consider an optional cargo-miri job in the check stage and push results to the SAST artifact report?
+# * Cargo may force recompilation due to docker mounted volumes having filesystems with differen mtime precision
+#   It depends on how gitlab project files in containers during jobs. Will need to test.
+
 include:
   - project: chrisss93/ci
     file: docker.gitlab-ci.yml
@@ -21,28 +38,20 @@ variables:
   RUST_VERSION: 1.75.0
   JOB_IMAGE: registry.gitlab.com/chrisss93/ci/rust:$RUST_VERSION # rust:$RUST_VERSION-slim
   CARGO_HOME: $CI_PROJECT_DIR/cargo_home
-  CACHE_CLEANUP_PATHS: '$CI_PROJECT_DIR/target/llvm-cov-target/debug/** $CI_PROJECT_DIR/target/debug/**'
+  CARGO_BUILD_JOBS: 4
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: false
+  TEST_CACHE_CRATES: '' # Space separated. Use [crate]@[version-number] if you depend on multiple versions of a crate
+  RELEASE_CACHE_CRATES: ''
 
 default:
   image: $JOB_IMAGE
   cache:
-    - &downloaded-deps-cache
-      key: $CI_PROJECT_PATH-cargo-deps
-      paths: [$CARGO_HOME/registry/cache]
-    - &compiled-deps-cache
-      key: $CI_PROJECT_PATH-$CI_COMMIT_REF_NAME-compiled-deps
-      when: always
-      paths: [$CI_PROJECT_DIR/target/debug]
-    - &test-deps-cache
-      key: $CI_PROJECT_PATH-$CI_COMMIT_REF_NAME-test-deps
-      when: always
-      paths: [$CI_PROJECT_DIR/target/llvm-cov-target/debug]
-
-workflow:
-  rules:
-    - if: $CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == 'push' && $CI_OPEN_MERGE_REQUESTS
-      when: never
-    - when: always
+    - &cargo-registry-cache
+      key: $CI_PROJECT_PATH-cargo-registry
+      unprotect: true
+      paths:
+        - $CARGO_HOME/registry/cache
 
 stages:
   - check
@@ -55,19 +64,25 @@ setup:
   image: registry.gitlab.com/gitlab-ci-utils/curl-jq:1.1.0
   script:
     - >-
+      cargo metadata --format-version 1 --no-deps |
+      jq -e '.packages[].targets[] | select(.kind | contains(["bin"]))' &&
+      touch .has_binary
+    - >-
       git clone --depth 1 --single-branch --branch main
       https://gitlab-ci-token:$CI_JOB_TOKEN@$CI_SERVER_HOST/chrisss93/ci.git
       /tmp/ci
     - cp -nr /tmp/ci/rust/.cargo .
   artifacts:
     paths:
-      - $CI_PROJECT_DIR/.cargo
+      - .cargo
+      - .has_binary
     expire_in: 1 hour
-  cache: []
+  cache: [] # or null?
 
 clippy:
   stage: check
   variables:
+    CLIPPY_ARGS: --all-targets --all-features --locked --no-deps --timings
     CODE_CLIMATE: |-
       [.[].message | select(.code != null) | . as $$msg | .spans[] | {
       "location": {"path": .file_name , "lines": {"begin": .line_start, "end": .line_end}},
@@ -84,33 +99,30 @@ clippy:
       "Performance", "Security", "Style"],
       "type": "issue"
       }]
-  before_script:
+  script:
+    - '[ -d target/crate-cache ] && cp -rpa target/crate-cache target/debug'
     - which cargo-clippy || rustup component add clippy
     - &install-jq >-
       which jq || (
       wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O $CI_PROJECT_DIR/jq &&
       chmod +x $CI_PROJECT_DIR/jq && ln -s $CI_PROJECT_DIR/jq /usr/local/bin/jq
       )
-  script:
-    - unset RUSTFLAGS
-    - >-
-      cargo clippy --message-format json --all-targets --all-features --locked --no-deps --all |
-      jq -s "$CODE_CLIMATE" > clippy.json
+    - cargo clippy $CLIPPY_ARGS --message-format json | jq -s "$CODE_CLIMATE" > clippy.json
     - >-
       if [ -s clippy.json ] && jq -e 'length > 0' clippy.json;
-      then cargo clippy --all-targets --all-features --locked --no-deps --all --color always && exit 222;
+      then cargo clippy $CLIPPY_ARGS --color always && exit 222;
       fi
   artifacts:
     when: always
     reports:
       codequality: clippy.json
-    expire_in: 1 week
+    paths:
+      - target/debug/cargo-timings/cargo-timing.html
   allow_failure:
     exit_codes:
       - 222
   cache: 
-    - *downloaded-deps-cache
-    - *compiled-deps-cache
+    - *cargo-registry-cache
 
 
 rustfmt:
@@ -124,10 +136,9 @@ rustfmt:
       "fingerprint": (.expected + $$name + (.original_begin_line | tostring)) | @base64,
       "type": "issue", "categories": ["Style"], "severity": "info", "check_name": "rustfmt"
       }]
-  before_script:
+  script:
     - *install-jq
     - cargo +nightly version || rustup toolchain install nightly
-  script:
     - >-
       cargo +nightly fmt --all --message-format json -- --config-path .cargo |
       jq --arg cwd "$PWD"/ "$CODE_CLIMATE" > rustfmt.json
@@ -139,7 +150,6 @@ rustfmt:
     when: always
     reports:
       codequality: rustfmt.json
-    expire_in: 1 week
   allow_failure:
     exit_codes: [222]
   cache: []
@@ -151,7 +161,7 @@ rustfmt:
 # repo but instead be imported and overwritten from an organization's dedicated centralized security repo so that
 # application developers cannot circumvent potential dependency vulnerabilities by unilaterally creating exceptions.
 
-dep-check:
+cargo-deny:
   stage: check
   variables:
     CODE_CLIMATE: |-
@@ -192,8 +202,8 @@ dep-check:
         "dependency_files": [{"path": "Cargo.lock", "package_manager": "cargo", "dependencies": $$deps}],
         "scan": {
           "type": "dependency_scanning",
-          "status": (if . | length > 0 then "failure" else "success" end),
-          "start_time": $$start, "end_time": now | strftime("%Y-%m-%dT%H:%M:%S"),
+          "status": "success",
+          "start_time": "$CI_JOB_STARTED_AT", "end_time": now | strftime("%Y-%m-%dT%H:%M:%S"),
           "analyzer": $SCANNER, "scanner": $SCANNER
         }
       }
@@ -207,7 +217,6 @@ dep-check:
       )
     - which cargo-deny || cargo binstall -y cargo-deny@0.14.3
   script:
-    - start=$(date -u +'%Y-%m-%dT%H:%M:%S')
     - cargo deny --all-features --locked --format json check --exclude-dev 2> deny.json || true
     - |-
       jq -sc "$CODE_CLIMATE" deny.json | while read -r item; do
@@ -224,7 +233,7 @@ dep-check:
     # - >-
     #   cargo metadata --format-version 1 |
     #   jq '.packages | map({"version": .version, "package": {"name": .name}})' > meta.json
-    # - jq -s --arg start $start --argjson deps "$(<meta.json)" $DEP_SCAN deny.json > deny-depscan.json
+    # - jq -s --argjson deps "$(<meta.json)" $DEP_SCAN deny.json > deny-depscan.json
     - |-
       if [ -s deny-codeclimate.json ] && jq -e 'length > 0' deny-codeclimate.json
       then cargo deny --all-features --locked --color always check --exclude-dev --show-stats || exit 222
@@ -236,7 +245,6 @@ dep-check:
     reports:
       codequality: deny-codeclimate.json
       # dependency_scanning: deny-depscan.json
-    expire_in: 1 week
   allow_failure:
     exit_codes: [222]
   cache: &cargo-bin-cache
@@ -245,7 +253,7 @@ dep-check:
       - $CARGO_HOME/bin
 
 
-.dep-audit:
+.cargo-vet:
   stage: check
   variables:
     CODE_CLIMATE: |-
@@ -292,17 +300,15 @@ dep-check:
         "dependency_files": [{"path": "Cargo.lock", "package_manager": "cargo", "dependencies": $$deps}],
         "scan": {
           "type": "dependency_scanning",
-          "status": (if . | length > 0 then "failure" else "success" end),
-          "start_time": $$start, "end_time": now | strftime("%Y-%m-%dT%H:%M:%S"),
+          "status": "success",
+          "start_time": "$CI_JOB_STARTED_AT", "end_time": now | strftime("%Y-%m-%dT%H:%M:%S"),
           "analyzer": $SCANNER, "scanner": $SCANNER
         }
       }
-  before_script:
+  script:
     - *install-jq
     - *binstall
     - which cargo-vet || cargo binstall -y cargo-vet@0.9.1
-  script:
-    - start=$(date -u +'%Y-%m-%dT%H:%M:%S')
     - cargo vet --output-format json --output-file vet.json || true
     - jq -e 'has("errors")' && cargo vet
     - |-
@@ -320,7 +326,7 @@ dep-check:
     # - >-
     #   cargo metadata --format-version 1 |
     #   jq '.packages | map({"version": .version, "package": {"name": .name}})' > meta.json
-    # - jq --arg start $start --argjson deps "$(<meta.json)" $DEP_SCAN vet.json > vet-depscan.json
+    # - jq --argjson deps "$(<meta.json)" $DEP_SCAN vet.json > vet-depscan.json
     - |-
       if [ -s vet-codeclimate.json ] && jq -e 'length > 0' vet-codeclimate.json
       then cargo vet; exit 222
@@ -332,7 +338,6 @@ dep-check:
     reports:
       codequality: vet-codeclimate.json
       # dependency_scanning: vet-depscan.json
-    expire_in: 1 week
   allow_failure:
     exit_codes:
       - 222
@@ -342,81 +347,132 @@ dep-check:
 unit-tests:
   stage: test
   variables:
-    TEST_ARGS: >-
+    NEXTEST_ARGS: >-
       --config-file .cargo/nextest.toml
-      --cobertura
-      --output-path target/llvm-cov-target/coverage.xml
       --locked
       --verbose
       --all-targets
       --all-features
-  before_script:
+      --timings
+    CRATES: $TEST_CACHE_CRATES
+    CACHE_FROM: target/llvm-cov-target/debug
+    CACHE_TO: target/crate-test-cache
+    TREE_FLAG: dev,normal
+  script:
     - *install-jq
     - *binstall
     - which cargo-llvm-cov || cargo binstall -y cargo-llvm-cov@0.6.9
     - which cargo-nextest || cargo binstall -y cargo-nextest@0.9.70
+    # Load specific dependency crates' compiled artifacts from a gitlab cache
+    - ./cache-crates.sh load target/llvm-cov-target/debug target/crate-test-cache
+    - cargo llvm-cov nextest $NEXTEST_ARGS -- $TEST_ARGS
+    - mkdir -p target/coverage/debug
+    - eval $(cargo llvm-cov show-env --export-prefix | grep 'RUSTFLAGS')
+    - >-
+      test_binaries=$(
+        CARGO_TARGET_DIR=target/llvm-cov-target
+        cargo nextest list --list-type binaries-only --message-format json |
+        jq -r '.["rust-binaries"] | .[] | .["binary-path"]'
+      )
+    - mv $test_binaries target/coverage/debug
+    - mv target/llvm-cov-target/*.profdata target/coverage/$CI_JOB_NAME.profdata
+    - mv target/llvm-cov-target/cargo-timings/cargo-timing.html target/coverage
+    # Save specific dependency crates' compiled artifacts to a gitlab cache
+    - ./cache-crates.sh save target/llvm-cov-target/debug target/crate-test-cache dev,normal $CRATES
+  artifacts:
+    when: always
+    reports:
+      junit: target/nextest/default/junit.xml
+    paths:
+      - target/coverage
+    expire_in: 1 day
+  needs:
+    - setup
+  cache:
+    - *cargo-registry-cache
+    - &crate-test-cache
+      key: $CI_PROJECT_PATH-test-cache
+      paths:
+        - $CI_PROJECT_DIR/target/crate-test-cache
+
+
+expensive-tests:
+  extends: unit-tests
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
+  variables:
+    TEST_ARGS: --ignored
+  #   DOCKER_HOST: "tcp://docker:2375"
+  #   DOCKER_TLS_CERTDIR: ""
+  #   DOCKER_DRIVER: overlay2
+  # services:
+  #   - name: docker:dind
+  #     command: ["--tls=false"]
+  before_script:
+    - cargo test -- --list --format terse --ignored > tests.txt
+    - '[ -s tests.txt ] || echo "No expensive/ignored tests to run" && exit 0'
+    - rm tests.txt
+
+
+coverage:
+  stage: build
   script:
-    - cargo llvm-cov nextest $TEST_ARGS
-  after_script:
+    - *install-jq
+    - *binstall
+    - which cargo-llvm-cov || cargo binstall -y cargo-llvm-cov@0.6.9
+    - >-
+      which llvm-profdata || rustup component list --installed | grep 'llvm-tools' || (
+        rustup component add llvm-tools-preview &&
+        ln -s $(rustc --print target-libdir)/../bin/llvm-profdata /usr/local/bin/llvm-profdata
+      )
+    - workspace=$(cargo metadata --format-version 1 --no-deps | jq -r '.workspace_root')
+    - llvm-profdata merge -sparse target/coverage/*.profdata > target/coverage/${workspace##*/}.profdata
+    - mv target/coverage target/llvm-cov-target
+    - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --cobertura --output-path target/llvm-cov/report.xml
+    - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --html --output-dir target/llvm-cov
     - cargo llvm-cov --ignore-filename-regex '/?main.rs' report
-    - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --html
     - >-
       cargo llvm-cov --ignore-filename-regex '/?main.rs' report --json |
       jq -r '(.data | map(.totals.regions.covered) | add) / (.data | map(.totals.regions.count) | add) |
       "Region coverage: \(. * 10000 | round | . / 100)%"'
   coverage: '/^Region coverage: (\d+\.\d+%)$/'
   artifacts:
-    when: always
     reports:
-      junit: target/nextest/default/junit.xml
       coverage_report:
         coverage_format: cobertura
-        path: target/llvm-cov/coverage.xml
+        path: target/llvm-cov/report.xml
     paths:
-      - target/llvm-cov/html/
-    expire_in: 1 week
-  needs:
-    - setup
+      - target/llvm-cov/html
   cache:
     - *cargo-bin-cache
-    - *downloaded-deps-cache
-    - *test-deps-cache
-
-.benchmarks:
-  stage: test
-  rules:
-    - when: manual
-  allow_failure: true
-  variables:
-    TOOLCHAIN: +stable
-    # JQ_EXPR: |-
-  script:
-    - >-
-      cargo $TOOLCHAIN bench --locked --verbose --all-targets --all-features -- -Z unstable-options --format json |
-      jq $JQ_EXPR > benchmarks.json
-  artifacts:
-    reports:
-      # load_performance: benchmarks.json # deprecated in 17.0
-      # metrics: benchmarks.json # Waiting for delta feature
-    expire_in: 1 month
-  dependencies:
-    - setup
-  cache:
-    - *downloaded-deps-cache
-    - *compiled-deps-cache
 
 
-compile:linux-gnu: &compile
+compile:linux-gnu:
   stage: build
   variables:
     CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
-  before_script:
-    - cargo build --locked --release --timings
-    - mv target/cargo-timings/cargo-timing.html target/cargo-timings/$CARGO_BUILD_TARGET.html
-    - mkdir -p binaries
+    CRATES: $RELEASE_CACHE_CRATES
+    CACHE_FROM: target/release
+    CACHE_TO: target/crate-release-cache
+    TREE_FLAG: normal
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - .has_binary
+    - when: manual
+      exists:
+        - .has_binary
   script:
+    - ./cache-crates.sh load target/release target/crate-release-cache
+    - *load-crates
+    - cargo build --release --locked --timings
+    - mv target/cargo-timings/cargo-timing.html target/cargo-timings/$CARGO_BUILD_TARGET.html
+    # TODO: Don't assume binaries are named "app".  Nor assume there might only be 1 binary generated from cargo build
+    - mkdir -p binaries
     - tar czvf binaries/$CARGO_BUILD_TARGET.tar.gz target/$CARGO_BUILD_TARGET/release/app
-  after_script:
+    - ./cache-crates.sh save target/release target/crate-release-cache normal $CRATES
+    - *save-crates
     # Upload binary to package registry if the pipeline was triggered by a git tag
     - '[ -z "$CI_COMMIT_TAG" ] && exit 0'
     - url=$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/binary/${CI_COMMIT_TAG#v}/$(ls binaries)
@@ -436,30 +492,97 @@ compile:linux-gnu: &compile
       - binaries/$CARGO_BUILD_TARGET.*
       - assets/$CARGO_BUILD_TARGET.json
       - target/cargo-timings/$CARGO_BUILD_TARGET.html
-    expire_in: 1 day
-  cache: *compiled-deps-cache
-  needs:
+  cache:
+    - *cargo-registry-cache
+    - &crate-release-cache
+      key: $CI_PROJECT_PATH-release-cache-$CI_JOB_NAME
+      paths:
+        - $CI_PROJECT_DIR/target/crate-release-cache
+  dependencies:
     - setup
-    - job: unit-tests
-      artifacts: false
 
-compile:linux-musl:
-  <<: *compile
+
+.compile:linux-musl:
+  extends: compile:linux-gnu
   image: registry.gitlab.com/chrisss93/ci/rust/alt-target:$RUST_VERSION
   variables:
     CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
     RUSTFLAGS: -C link-arg=-fuse-ld=mold -C target-feature=-crt-static
-  cache: []
 
-compile:windows:
-  <<: *compile
+
+.compile:windows:
+  extends: compile:linux-gnu
   image: registry.gitlab.com/chrisss93/ci/rust/alt-target:$RUST_VERSION
   variables:
     CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
     RUSTFLAGS: -C linker=x86_64-w64-mingw32-gcc -C ar=/usr/x86_64-w64-mingw32/bin/ar
   script:
     - zip binaries/$CARGO_BUILD_TARGET.zip target/$CARGO_BUILD_TARGET/release/app.exe
-  cache: []
+
+
+# Maybe write this around criterion/iai? (or else rust nightly may be required...)
+.benchmark:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - .has_benchmarks
+    - when: manual
+      exists:
+        - .has_benchmarks
+  variables:
+    # JQ_EXPR: |-
+    CRATES: $RELEASE_CACHE_CRATES
+    CACHE_FROM: target/release
+    CACHE_TO: target/crate-release-cache
+  script:
+    - *install-jq
+    - *binstall
+    - # Test if using iai-callgrind for benching and if so, binstall the iai-callgrind-runner
+      # cargo binstall -y iai-callgrind-runner@0.11.0
+    - ./cache-crates.sh load target/release target/crate-release-cache
+    # Maybe do something about the baselines
+    - >-
+      cargo bench --locked --verbose --all-targets --all-features --  --output-format json
+      jq -s $JQ_EXPR > benchmarks.json
+    - ./cache-crates.sh save target/release target/crate-release-cache normal $CRATES
+  artifacts:
+    reports:
+      # load_performance: benchmarks.json # deprecated in 17.0
+      # metrics: benchmarks.json # Waiting for delta feature
+    expire_in: 2 weeks
+  dependencies:
+    - setup
+  needs:
+    - job: compile:linux-gnu
+      optional: true
+      artifacts: false
+  cache:
+    - *cargo-registry-cache
+    # - <<: *crate-release-cache
+    #   key: $CI_PROJECT_PATH-release-cache-compile:linux-gnu
+    #   policy: pull
+
+
+.clear-cache:
+  stage: .post
+  image: alpine:3.18
+  rules:
+    - when: manual
+  script:
+    - mkdir -p target/crate-test-cache target/crate-release-cache
+  parallel:
+    matrix:
+      - JOB_CACHE_NAME: [compile:linux-gnu, compile:linux-musl, compile:windows]
+  cache:
+    - <<: *crate-test-cache
+      policy: push
+    - <<: *crate-release-cache
+      key: $CI_PROJECT_PATH-release-cache-$JOB_CACHE_NAME
+      policy: push
+  allow_failure: true
+  dependencies: []
+
 
 pages:
   stage: .post

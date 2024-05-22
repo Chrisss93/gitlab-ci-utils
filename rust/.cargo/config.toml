@@ -1,3 +1,7 @@
+[profile.bench]
+debug = true
+strip = false
+
 [build]
 rustflags = [
     "-W", "clippy::all",

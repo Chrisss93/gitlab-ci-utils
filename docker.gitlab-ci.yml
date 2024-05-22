@@ -9,7 +9,6 @@
 variables:
   DOCKER_FILE:
   DOCKER_CONTEXT:
-  CACHE_CLEANUP_PATHS:
 
 workflow:
   rules:
@@ -75,8 +74,6 @@ cleanup:
       $CI_SERVER_URL/jwt/auth?service=container_registry&scope=repository:$img_name:pull,delete |
       jq -r '.token')
   script:
-    - 'echo "Clearing caches: $CACHE_CLEANUP_PATHS"'
-    - rm -rf $CACHE_CLEANUP_PATHS
     - if [ -z "$CI_COMMIT_TAG" ]; then img_tag=dev-$CI_COMMIT_REF_NAME; else img_tag=${CI_COMMIT_TAG#v}; fi
     - if [ "$img_tag" == "dev-main" ]; then img_tag=latest; fi
     - 'echo "Removing image: $img:$img_tag"'

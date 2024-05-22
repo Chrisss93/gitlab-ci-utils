@@ -1,0 +1,322 @@
+include:
+  - project: chrisss93/ci
+    file: docker.gitlab-ci.yml
+
+variables:
+  JDK_VERSION: 11
+  JOB_IMAGE: maven:3.8.6-openjdk-$JDK_VERSION-slim
+
+default:
+  image: $JOB_IMAGE
+  cache:
+    - key: $CI_PROJECT_PATH-maven-repository
+      paths:
+        - $CI_PROJECT_DIR/.m2/repository
+        - /usr/local/bin
+      unprotect: true
+
+stages:
+  - check
+  - test
+  - deploy
+
+setup:
+  stage: .pre
+  variables:
+    PLUGIN_FOUND: (.project.build.plugins.plugin[] | select(.artifactId == "$PLUGIN"))
+    PLUGINS: maven-pmd-plugin spotbugs-maven-plugin maven-checkstyle-plugin ossindex-maven-plugin jacoco-maven-plugin
+  script:
+    - mvn help:effective-pom -Doutput=full-pom.xml
+    - &install-yq >-
+      which yq || (
+        curl -L https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64.tar.gz | tar xzvf &&
+        mv yq_linux_amd64 /usr/local/bin/yq
+      )
+    - |-
+      for PLUGIN in $PLUGINS
+      do yq -p xml -e "$PLUGIN_FOUND" full-pom.xml && touch applicable_plugins/.$PLUGIN
+      done
+  artifacts:
+    paths:
+      - full-pom.xml
+      - applicable_plugins
+
+pmd:
+  stage: check
+  variables:
+    PLUGIN: maven-pmd-plugin
+    GOAL: pmd:check
+    REPORT: target/pmd.xml
+    ARTIFACT_EXT: json
+    PLUGIN_EXISTS: (.project.build.plugins.plugin[] | select(.artifactId == "$PLUGIN"))
+    PLUGIN_CONFIG: '{"failOnViolation": "false", "printFailingErrors": "true", "targetDirectory": "target"}'
+    YQ_EXPR: >-
+      .pmd.file | map( .+@name as $$name | [.violation] | flatten | map(.name |= $$name) ) | flatten | map({
+      "check_name": "PMD \(.+@ruleset): \(.+@rule)", "description": .+content, "type": "issue",
+      "location": { "path": .name, "lines": { "begin": .+@beginline, "end": .+@endline } },
+      "fingerprint": (.+content | @base64),
+      "severity": ( .+@priority | (
+      with(select(. == "1"); . |= "blocker") |
+      with(select(. == "2"); . |= "critical") |
+      with(select(. == "3"); . |= "major") |
+      with(select(. == "4"); . |= "minor") |
+      with(select(. == "5"); . |= "info")
+      )),
+      "type": "issue", "categories": ["Clarity"]
+      })
+    VALIDATE_EXPR: . | length > 0
+  rules:
+    - exists:
+        - applicable_plugins/$PLUGIN
+  script:
+    - yq -p xml -o xml -i "${PLUGIN_EXISTS}.configuration |= . * $PLUGIN_CONFIG" full-pom.xml
+    - mvn -f full-pom.xml $GOAL $EXTRA_OPTS
+    - yq -p ${REPORT##*.} -o $ARTIFACT_EXT "$YQ_EXPR" $REPORT > report.json
+    - if [ -s report.json ] && yq -e "$VALIDATE_EXPR" report.json && exit 222
+  artifacts:
+    paths:
+      - site/**
+      - $REPORT
+    reports:
+      codequality: report.json
+  allow_failure:
+    exit_codes: [222]
+
+# Perhaps makes more sense to convert this to a SAST report instead of codequality?
+spotbugs:
+  extends: pmd
+  stage: check
+  variables:
+    PLUGIN: spotbugs-maven-plugin
+    GOAL: compile spotbugs:check
+    REPORT: target/spotbugsXml.xml
+    PLUGIN_CONFIG: >- 
+      {"spotbugsXmlOutputFilename": "spotbugsXml.xml", "spotbugsXmlOutputDirectory": "target", "failOnError": "false"}
+    YQ_EXPR: >-
+      .BugCollection.BugInstance | map( . as $$bug | [.SourceLine] | flatten | filter(.+@primary).[0] | {
+      "check_name": "SpotBugs \($$bug.+@category): \($$bug.+@type)", "description": $$bug.ShortMessage,
+      "location": { "path": .+@sourcepath, "lines": { "begin": .+@start, "end": .+@end } },
+      "fingerprint": $$bug.+@instanceHash,
+      "severity": ( $$bug.+@priority | (
+      with(select(. == "1"); . |= "blocker") |
+      with(select(. == "2"); . |= "major") |
+      with(select(. == "3"); . |= "minor")
+      )),
+      "type": "issue", "categories": ["BugRisk", "Security"]
+      })
+
+
+checkstyle:
+  extends: pmd
+  variables:
+    PLUGIN: maven-checkstyle-plugin
+    GOAL: checkstyle:checkstyle
+    REPORT: target/checkstyle.xml
+    PLUGIN_CONFIG: >-
+      {"outputFile": "target/checkstyle-result.xml", "outputFileFormat": "xml", "logViolationsToConsole": "true",
+      "logViolationCountToConsole": "true", "failsOnError": "false", "failOnViolation": "false", "consoleOutput": true,
+      "cacheFile": "target/checkstyle-cachefile"}
+    YQ_EXPR: >-
+      .checkstyle.file | map( .+@name as $$name | .error | map(.name |= $$name) ) | flatten | map({
+      "check_name": "Checkstyle", "description": .+@message,
+      "location": { "path": .name, "lines": { "begin": .+@line, "end": .+@line } },
+      "fingerprint": (.+@line + .+@column + .name | @base64),
+      "severity": "minor", "type": "issue", "categories": ["Style"]
+      })
+
+
+oss-index:
+  extends: pmd
+  variables:
+    PLUGIN: ossindex-maven-plugin
+    GOAL: ossindex:audit
+    REPORT: target/ossindex-report.json
+    PLUGIN_CONFIG: '{"reportFile": "target/ossindex-report.json"}'
+    SCAN: >-
+      {"id": "oss-index", "name": "oss-index", "version": "3.2.0", "vendor": {"name": "Sonatype OSS Index"},
+      "url": "https://ossindex.sonatype.org"}
+    PKG_REGEX: pkg:maven/(?P<p>.+)@(?P<v>.+)
+    JSON_SCHEMA: https://gitlab.com/gitlab-org/security-products/security-report-schemas/-/raw/v15.0.6/dist/dependency-scanning-report-format.json?ref_type=tags
+    YQ_EXPR: >-
+      {"version": "15.0.6", "schema": "$JSON_SCHEMA", "scan": {"type": "dependency_scanning", "status": "success",
+      "analyzer": $SCAN, "scanner": $SCAN, "start_time": "$CI_JOB_STARTED_AT", "end_time": (now | tz("UTC"))},
+      "vulnerabilities": .reports | filter(.vulnerabilities // [] | length > 0) |
+      map(.coordinates as $$pkg | .vulnerabilities | map(.pkg |= $$pkg)) | flatten | map({
+      "id": .id, "name": .title, "description": .description, "severity": "Medium",
+      "identifiers": [{ "type": "cve", "value": .cve, "name": .title, "url": .reference}],
+      "location": ( .pkg | capture("$PKG_REGEX") | {"dependency": {"version": .v, "package": {"name": .p}}} )
+      })
+      }
+    VALIDATE_EXPR: .vulnerabilities | length > 0
+  artifacts:
+    reports:
+      dependency_scanning: report.json
+
+
+# If pipeline is not running in main branch or on git tag, the integration-tests job should ONLY run integration-tests
+# In order to do that, if the pom.xml is using the failsafe plugin for integration tests, during the integration-test
+# job, set the surefire plugin configuration property SkipTests to true. So when the maven integration-test phase
+# is run, no surefire tests should be executed during dependent maven test phase
+#
+# If the pom.xml is not using the failsafe plugin, but instead relying entirely on surefire for both types of tests,
+# add an execution block in the plugin targeting the maven test phase, and then set the configuration property
+# SkipTests to true. Merge that property if such an execution block targeting the maven test phase already exists.
+
+unit-tests:
+  stage: test
+  variables:
+    JACOCO_CONFIG: >-
+      with(.project.build.plugins.plugin[];
+      with(select(.artifactId == "jacoco-maven-plugin");
+      .executions.execution |= . // [{"id": "tmp-$CI_JOB_NAME", "goals": {"goal": "prepare-agent"}}] |
+      .executions.execution[] |
+      with(select([.goals.goal] | flatten | .[] |
+      (contains("prepare-agent") or contains("prepare-agent-integration")));
+      .configuration |= . * {"destFile": "target/jacoco/$CI_JOB_NAME.exec"}
+      )
+      ))
+  script:
+    - *install-yq
+    - yq -p xml -o xml -i "$JACOCO_CONFIG" full-pom.xml
+    - mvn -f full-pom.xml test $EXTRA_OPTS
+  artifacts:
+    when: always
+    paths:
+      - target/jacoco
+    reports:
+      junit: target/**/TEST-*.xml
+
+
+integration-tests:
+  extends: unit-tests
+  variables:
+    SUREFIRE_CONFIG: >-
+      with(.project.build.plugins.plugin[];
+      with(select(.artifactId == "maven-surefire-plugin");
+      .executions.execution |= . // [{"phase": "test", "id": "tmp-$CI_JOB_NAME", "goals": {"goal": "test"}}] |
+      .executions.execution[] | with(select(.phase == "test"); .configuration |= . * {"skipTests": "true"})
+      ))
+  script:
+    - *install-yq
+    - yq -p xml -o xml -i "$JACOCO_CONFIG" full-pom.xml
+    # Disable surefire tests during the maven test phase so the maven integration-test phase doesn't re-run
+    # tests from the unit-test job
+    - yq -p xml -o xml -i "$SUREFIRE_CONFIG" full-pom.xml
+    - mvn -f full-pom.xml integration-test $EXTRA_OPTS
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
+
+# This is especially silly that we must transform a popular coverage tooling format (jacoco) into a dead, barely
+# documented format (cobertura).  But gitlab does not yet support jacoco coverage format.
+# See: https://gitlab.com/gitlab-org/gitlab/-/issues/227345
+
+# TODO:
+#  X Figure out if gitlab can re-run this coverage job if/when the manual upstream job integration-tests is run.
+#    This would mean we would have two jacoco.exec files, which would need to be merged so we could get the
+#    complete coverage.
+#  ✓ In order for the upstream jobs to even export their jacoco.exec files in the first place, the job needs to
+#    anticipate where those files will be found.  Might need to inspect the pom and/or manually set the configuration
+#    values to ensure a predictable file location. Ugh...
+#  ✓ Continue refining the YQ_EXPR.  Nearly there, but not all lines are appearing (ie. JetStreamSinkWriterMetrics)
+#  ✓ Recheck pom.xml and make sure you understand the conditions for surefire and jacoco plugins to work while both
+#    using the argLine.
+#  * The PMD job (and all extensions) suffer from the issue that we change the plugin config, but if the pom.xml
+#    for that plugin specifies specific configuration in individual execution blocks, our config will be ignored.
+#    We can instead target the plugin config to specific execution blocks, but this means adding another parameter to
+#    know which goal to create/update the execution configuration for.
+
+coverage:
+  extends: pmd
+  stage: test
+  variables:
+    PLUGIN: jacoco-maven-plugin
+    GOAL: jacoco:merge jacoco:report
+    REPORT: target/site/jacoco/jacoco.xml
+    PLUGIN_CONFIG: >-
+      {"dataFile": "target/jacoco.exec", "formats": "HTML,XML", "outputDirectory": "target/site/jacoco",
+      "fileSets": {"fileSet": {"directory": "target/jacoco", "include": "*.exec"}} 
+      }
+    ARTIFACT_EXT: xml
+    VALIDATE_EXPR: false
+    ATTRS: >-
+      "+@line-rate": .counter | filter(.+@type == "LINE") | .[] |
+        (.+@covered | to_number) / ((.+@missed | to_number) + (.+@covered | to_number)),
+      "+@branch-rate": .counter | filter(.+@type == "BRANCH") | (.[] // {"+@covered": 1, "+@missed": 0})  |
+        (.+@covered | to_number) / ((.+@missed | to_number) + (.+@covered | to_number)),
+      "+@complexity": .counter | filter(.+@type == "COMPLEXITY") | .[] |
+        (.+@covered | to_number) + (.+@missed | to_number),
+    YQ_EXPR: >- 
+      { "+p_xml": .+p_xml,
+        "+directive": "DOCTYPE coverage SYSTEM \"http://cobertura.sourceforge.net/xml/coverage-04.dtd\"",
+        "coverage": .report | { $ATTRS
+        "+@timestamp": [.sessioninfo] | flatten | map(.+@start | to_number) | max,
+        "sources": { "source": ["${CI_PROJECT_DIR}/src/main/java"] },
+        "packages": { "package": .package | map(
+          ([.sourcefile] | flatten | filter(has("line"))) as $src |
+          ([.class] | flatten | filter(has("method"))) as $class | { $ATTRS
+          "+@name": .+@name | sub("/", "."),
+          "classes": { "class": $class | map( .+@sourcefilename as $name | { $ATTRS
+            "+@name": .+@name | sub("/", "."),
+            "+@filename": (.+@name | sub("(.+/).*", "${1}")) + $name,
+            "methods": { "method": [.method] | flatten | map(
+              (.+@line | to_number) as $line |
+              ($class | filter(.+@sourcefilename == $name) |
+                map([.method]) | flatten |
+                map(.+@line | to_number) | filter(. > $line) | min) as $nextMethodLine | { $ATTRS
+              "+@name": .+@name, "+@signature": .+@desc,
+              "lines": { "line":
+                $src | filter(.+@name == $name) | [.[].line] | flatten | map(.+@nr |= to_number) |
+                filter( .+@nr >= $line and (.+@nr < $nextMethodLine or $nextMethodLine == null) ) |
+                map({
+                  "+@number": .+@nr,
+                  "+@hits": .+@ci | to_number | with(select(. > 0); 1) | with(select(. == 0); 0),
+                  "+@branch": ((.+@mb | to_number) + (.+@cb | to_number) > 0)
+                })
+              }
+            })
+            }
+          })
+          }
+        })
+        }}
+      }
+  after_script:
+    - >- 
+      yq '.report.counter[] | select(.+@type == "BRANCH") |
+      100 * (.+@covered | to_number) / (.+@covered | to_number) + (.+@missed | to_number) |
+      "\(.)" |  sub("(\d+(\.\d{1,2})?).*", "Branch Coverage: ${1}%")' target/jacoco/jacoco.xml
+  needs:
+    - unit-tests
+    - integration-tests
+  rules:
+    - exists:
+        - target/jacoco/*.exec
+  coverage: '/^Branch Coverage: (\d+\.?\d+%)$/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: report.json
+  allow_failure: false
+
+
+deploy:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    SETTINGS_GITLAB_SERVER: >-
+      {"id": "pipeline-gitlab-maven",
+      "configuration": {"httpHeaders": {"property": {"name": "Job-Token", "value": "$CI_JOB_TOKEN"}}}
+      }
+    POM_GITLAB_URL: '{"id": "pipeline-gitlab-maven", "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven}'
+  script:
+    - *install-yq
+    - if [ -f "settings.xml" ] || touch settings.xml
+    - yq -i -p xml -o xml ".project.settings.servers.server |= (. // []) + $SETTINGS_GITLAB_SERVER" settings.xml
+    - yq -i -p xml -o xml ".project.repositories.repository |= (. // []) + $POM_GITLAB_URL" full-pom.xml
+    - yq -i -p xml -o xml ".project.distributionManagement.repository |= (. // []) + $POM_GITLAB_URL" full-pom.xml
+    - yq -i -p xml -o xml ".project.distributionManagement.snapshotRepository |= (. // []) + $POM_GITLAB_URL" full-pom.xml
+    - mvn -s settings.xml deploy
+

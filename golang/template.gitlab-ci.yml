@@ -121,9 +121,9 @@ dep-check:
         }],
         "scan": {
           "type": "dependency_scanning",
-          "status": (if [. | select(.[].vulnerability != null)] | length > 0 then "failure" else "success" end),
-          "start_time": $$start, "end_time": now | strftime("%Y-%m-%dT%H:%M:%S"),
-          "analyzer": $$SCANNER, "scanner": $$SCANNER
+          "status": "success",
+          "start_time": "$CI_JOB_STARTED_AT", "end_time": now | strftime("%Y-%m-%dT%H:%M:%S"),
+          "analyzer": $SCANNER, "scanner": $SCANNER
         }
       }
   before_script:
@@ -136,10 +136,12 @@ dep-check:
       )
     - which jq || apk add --no-cache jq
   script:
-    - start=$(date -u +'%Y-%m-%dT%H:%M:%S')
     - govulncheck -json -test ./... > raw.json
     - jq -s "$CODE_CLIMATE" raw.json > govulncheck.json
-    # - jq -s --arg start $start "$DEP_SCAN" raw.json > govulncheck-scan.json
+    # - jq -s "$DEP_SCAN" raw.json > govulncheck-scan.json
+    # - >-
+    #   [ -s govulncheck-scan.json ] && jq -e ".vulnerabilities | length > 0" govulncheck-scan.json &&
+    #   govulncheck -test ./...
     - '[ -s govulncheck.json ] && jq -e "length > 0" govulncheck.json && govulncheck -test ./...'
   artifacts:
     when: always
@@ -208,14 +210,37 @@ unit-tests:
   stage: test
   variables:
     GO_JUNIT_URL: https://github.com/jstemmer/go-junit-report/releases/download
-    GO_COV_REPORT_URL: https://github.com/matm/gocov-html/releases/download
-  before_script:
+  script:
     - mkdir -p $GOPATH/bin
     - >-
       which go-junit-report || (
       wget -O - $GO_JUNIT_URL/v2.0.0/go-junit-report-v2.1.0-linux-amd64.tar.gz | tar xzv - -C $GOPATH/bin &&
       ln -s $GOPATH/bin/go-junit-report /usr/local/bin/go-junit-report
       )
+    - |-
+      if [ -z "$BUILD_TAG" ]; then
+      go test -list '.*' ./... | grep -Ev '^(ok|\?)\s+' | sort > untagged.txt
+      go test -list '.*' -tags $BUILD_TAG ./... | grep -Ev '^(ok|\?)\s+' | sort > tagged.txt
+      SKIP=$(comm -23 tagged.txt untagged.txt | tr '\n' '/')
+      fi
+    - go test -tags '$BUILD_TAG' -skip "$SKIP" -coverprofile cover/${CI_JOB_NAME}.cov -v ./... | tee test.txt
+    - go-junit-report --set-exit-code --in test.txt > junit.xml
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+    paths:
+      - cover
+
+
+coverage:
+  stage: build
+  rules:
+    - exists: [cover/*.cov]
+  variables:
+    GO_COV_REPORT_URL: https://github.com/matm/gocov-html/releases/download
+  before_script:
+    - mkdir -p $GOPATH/bin
     - >-
       which gocov || (
       GOPATH=/go go install github.com/axw/gocov/gocov@v1.1.0 &&
@@ -235,50 +260,26 @@ unit-tests:
       ln -s $CI_PROJECT_DIR/.go/bin/gocov-xml /usr/local/bin/gocov-xml
       )
   script:
-    - go test -coverprofile=c.out -v ./... | tee test.txt
-    - go-junit-report --set-exit-code --in test.txt > junit.xml
-  after_script:
-    - |-
-      if [ -s "c.out" ]; then
-      gocov convert c.out | gocov-xml > coverage.xml
-      gocov convert c.out | gocov-html -t kit > coverage.html
-      gocov convert c.out | gocov report
-      fi
+    - gocov convert cover/* > coverage.json
+    - cat coverage.json | gocov-xml > coverage.xml
+    - cat coverage.json | gocov-html -t kit > coverage.html
+    - cat coverage.json | gocov report
   coverage: '/^Total Coverage: [1-9]\d*(?:\.\d+)?% \(\d+/\d+\)$/'
-  dependencies: []
   artifacts:
-    when: always
+    paths: [coverage.html]
     reports:
-      junit: junit.xml
       coverage_report:
         coverage_format: cobertura
         path: coverage.xml
-    paths:
-      - coverage.html
-
-
-.integration-tests:
-  extends: unit-tests
-  variables:
-    BUILD_TAG: integration
-  services:
-    - name: docker:dind
-      command: ["--tls=false"]
-  variables:
-    DOCKER_HOST: "tcp://docker:2375"
-    DOCKER_TLS_CERTDIR: ""
-    DOCKER_DRIVER: overlay2
-  script:
-    - go test -coverprofile=c.out -v -tags $BUILD_TAG ./... | tee test.txt
-    - go-junit-report --set-exit-code --in test.txt > junit.xml
 
 
 compile:
   stage: build
-  before_script:
-    - which zip || apk add --no-cache zip
+  variables:
+    CGO_ENABLED: 0
   script:
-    - CGO_ENABLED=0 go build -ldflags "$GO_LDFLAGS" -o binaries/app ./....
+    - which zip || apk add --no-cache zip
+    - go build -ldflags "$GO_LDFLAGS" -o binaries/app ./....
     - |-
       if [ "$GOOS" == "windows" ]
       then zip binaries/$GOOS-$GOARCH.zip binaries/app
@@ -304,7 +305,6 @@ compile:
     paths:
       - binaries/$GOOS-$GOARCH.*
       - assets/$GOOS-$GOARCH.json
-  dependencies: []
 
 
 pages:
