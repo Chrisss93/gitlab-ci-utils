@@ -64,10 +64,6 @@ setup:
   image: registry.gitlab.com/gitlab-ci-utils/curl-jq:1.1.0
   script:
     - >-
-      cargo metadata --format-version 1 --no-deps |
-      jq -e '.packages[].targets[] | select(.kind | contains(["bin"]))' &&
-      touch .has_binary
-    - >-
       git clone --depth 1 --single-branch --branch main
       https://gitlab-ci-token:$CI_JOB_TOKEN@$CI_SERVER_HOST/chrisss93/ci.git
       /tmp/ci
@@ -75,7 +71,6 @@ setup:
   artifacts:
     paths:
       - .cargo
-      - .has_binary
     expire_in: 1 hour
   cache: [] # or null?
 
@@ -458,12 +453,12 @@ compile:linux-gnu:
     TREE_FLAG: normal
   rules:
     - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      exists:
-        - .has_binary
     - when: manual
-      exists:
-        - .has_binary
   script:
+    - >-
+      cargo metadata --format-version 1 --no-deps |
+      jq -e '.packages[].targets[] | select(.kind | contains(["bin"]))' ||
+      (echo "No binaries to build" && exit 0)
     - ./cache-crates.sh load target/release target/crate-release-cache
     - cargo build --release --locked --timings
     - ./cache-crates.sh save target/release target/crate-release-cache normal $CRATES
@@ -499,6 +494,10 @@ compile:linux-gnu:
   dependencies:
     - setup
 
+# It would be cleaner and more succinct to declare all these compile (binary release build) jobs in a single
+# parallel matrix job.  However we would run into an arbitrary character limitation on job names.
+# Once the following issues are resolved, we can unite this into a single job:
+# https://gitlab.com/groups/gitlab-org/-/epics/11791
 
 .compile:linux-musl:
   extends: compile:linux-gnu
@@ -509,13 +508,26 @@ compile:linux-gnu:
 
 
 .compile:windows:
-  extends: compile:linux-gnu
-  image: registry.gitlab.com/chrisss93/ci/rust/alt-target:$RUST_VERSION
+  extends: compile:linux-musl
   variables:
     CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
     RUSTFLAGS: -C linker=x86_64-w64-mingw32-gcc -C ar=/usr/x86_64-w64-mingw32/bin/ar
-  script:
+  after_script:
+    - rm -r binaries/$CARGO_BUILD_TARGET.tar.gz
     - zip binaries/$CARGO_BUILD_TARGET.zip target/$CARGO_BUILD_TARGET/release/app.exe
+
+
+.compile:linux-aarch64
+  extends: compile:linux-musl
+  variables:
+    CARGO_BUILD_TARGET: aarch64-unknown-linux-gnu
+    RUSTFLAGS: ''
+
+.compile:wasm
+  extends: compile:linux-musl
+  variables:
+    CARGO_BUILD_TARGET: wasm32-unknown-unknown
+    RUSTFLAGS: ''
 
 
 # Maybe write this around criterion/iai? (or else rust nightly may be required...)
@@ -523,11 +535,7 @@ compile:linux-gnu:
   stage: build
   rules:
     - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      exists:
-        - .has_benchmarks
     - when: manual
-      exists:
-        - .has_benchmarks
   variables:
     # JQ_EXPR: |-
     CRATES: $RELEASE_CACHE_CRATES
@@ -535,15 +543,19 @@ compile:linux-gnu:
     CACHE_TO: target/crate-release-cache
   script:
     - *install-jq
+    - >-
+      cargo metadata --format-version 1 --no-deps |
+      jq -e '.packages[].targets[] | select(.kind | contains(["bench"]))' ||
+      (echo "No benchmarks to run" && exit 0)
     - *binstall
     - # Test if using iai-callgrind for benching and if so, binstall the iai-callgrind-runner
       # cargo binstall -y iai-callgrind-runner@0.11.0
-    - ./cache-crates.sh load target/release target/crate-release-cache
+    - ./cache-crates.sh load target/release target/crate-bench-cache
     # Maybe do something about the baselines
     - >-
       cargo bench --locked --verbose --all-targets --all-features --  --output-format json
       jq -s $JQ_EXPR > benchmarks.json
-    - ./cache-crates.sh save target/release target/crate-release-cache normal $CRATES
+    - ./cache-crates.sh save target/release target/crate-bench-cache normal $CRATES
   artifacts:
     reports:
       # load_performance: benchmarks.json # deprecated in 17.0
@@ -551,15 +563,11 @@ compile:linux-gnu:
     expire_in: 2 weeks
   dependencies:
     - setup
-  needs:
-    - job: compile:linux-gnu
-      optional: true
-      artifacts: false
   cache:
     - *cargo-registry-cache
-    # - <<: *crate-release-cache
-    #   key: $CI_PROJECT_PATH-release-cache-compile:linux-gnu
-    #   policy: pull
+    - key: $CI_PROJECT_PATH-benchmark-cache
+      paths:
+        - $CI_PROJECT_DIR/target/crate-bench-cache
 
 
 .clear-cache:

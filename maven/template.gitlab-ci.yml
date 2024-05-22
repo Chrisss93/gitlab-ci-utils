@@ -33,16 +33,9 @@ setup:
         curl -L https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64.tar.gz | tar xzv &&
         mv yq_linux_amd64 /usr/local/sbin/yq
       )
-    - mkdir applicable_plugins
-    - |-
-      for PLUGIN in $PLUGINS; do
-      yq -p xml -eoy "(.project.build.plugins.plugin[] | select(.artifactId == \"$PLUGIN\"))" full-pom.xml && \
-      touch applicable_plugins/.$PLUGIN || true
-      done
   artifacts:
     paths:
       - full-pom.xml
-      - applicable_plugins
 
 pmd:
   stage: check
@@ -68,10 +61,12 @@ pmd:
       "type": "issue", "categories": ["Clarity"]
       })
     ISSUES_EXPR: . | length > 0
-  rules:
-    - exists:
-        - applicable_plugins/$PLUGIN
   script:
+    - >-
+      yq -p xml -eoy "$PLUGIN_EXISTS" || (
+        echo "$PLUGIN not configured for this project. Consider adding it or disabling this job." &&
+        exit 222
+      )
     - yq -p xml -o xml -i "${PLUGIN_EXISTS}.configuration |= . * $PLUGIN_CONFIG" full-pom.xml
     - mvn -f full-pom.xml $GOAL $EXTRA_OPTS
     - yq -p ${REPORT##*.} -o $ARTIFACT_EXT "$YQ_EXPR" $REPORT > report.json
@@ -153,6 +148,7 @@ oss-index:
     ISSUES_EXPR: .vulnerabilities | length > 0
   artifacts:
     reports:
+      codequality: []
       dependency_scanning: report.json
 
 
@@ -292,12 +288,10 @@ coverage:
   needs:
     - unit-tests
     - integration-tests
-  rules:
-    - exists:
-        - target/jacoco/*.exec
   coverage: '/^Branch Coverage: (\d+\.?\d+%)$/'
   artifacts:
     reports:
+      codequality: []
       coverage_report:
         coverage_format: cobertura
         path: report.json
