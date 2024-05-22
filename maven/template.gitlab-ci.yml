@@ -12,7 +12,7 @@ default:
     - key: $CI_PROJECT_PATH-maven-repository
       paths:
         - $CI_PROJECT_DIR/.m2/repository
-        - /usr/local/bin
+        - /usr/local/sbin
       unprotect: true
 
 stages:
@@ -31,7 +31,7 @@ setup:
     - &install-yq >-
       which yq || (
         curl -L https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64.tar.gz | tar xzvf &&
-        mv yq_linux_amd64 /usr/local/bin/yq
+        mv yq_linux_amd64 /usr/local/sbin/yq
       )
     - |-
       for PLUGIN in $PLUGINS
