@@ -66,7 +66,7 @@ pmd:
     - >-
       yq -p xml -eoy "$PLUGIN_EXISTS" || (
         echo "$PLUGIN not configured for this project. Consider adding it or disabling this job." &&
-        exit 222
+        echo '[]' > report.json && exit 222
       )
     - yq -p xml -o xml -i "${PLUGIN_EXISTS}.configuration |= . * $PLUGIN_CONFIG" full-pom.xml
     - mvn -f full-pom.xml $GOAL $EXTRA_OPTS
