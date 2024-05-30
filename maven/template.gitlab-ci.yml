@@ -44,7 +44,7 @@ pmd:
     GOAL: pmd:check
     REPORT: target/pmd.xml
     ARTIFACT_EXT: json
-    PLUGIN_EXISTS: (.project.build.plugins.plugin[] | select(.artifactId == "$PLUGIN"))
+    PLUGIN_EXISTS: (.project.build.plugins.plugin[] | select(.artifactId == \"$PLUGIN\"))
     PLUGIN_CONFIG: '{"failOnViolation": "false", "printFailingErrors": "true", "targetDirectory": "target"}'
     YQ_EXPR: >-
       .pmd.file | map( .+@name as $$name | [.violation] | flatten | map(.name |= $$name) ) | flatten | map({
@@ -63,10 +63,10 @@ pmd:
     ISSUES_EXPR: . | length > 0
   script:
     - *install-yq
+    - set +e
     - >-
       yq -p xml -eoy "$PLUGIN_EXISTS" || (
-        echo "$PLUGIN not configured for this project. Consider adding it or disabling this job." &&
-        echo '[]' > report.json && exit 222
+        echo "$PLUGIN not configured for this project. Consider adding it or disabling this job." && exit 222
       )
     - yq -p xml -o xml -i "${PLUGIN_EXISTS}.configuration |= . * $PLUGIN_CONFIG" full-pom.xml
     - mvn -f full-pom.xml $GOAL $EXTRA_OPTS
@@ -79,7 +79,7 @@ pmd:
     reports:
       codequality: report.json
   allow_failure:
-    exit_codes: [222]
+    exit_codes: 222
 
 # Perhaps makes more sense to convert this to a SAST report instead of codequality?
 spotbugs:
