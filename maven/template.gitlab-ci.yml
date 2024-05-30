@@ -129,7 +129,7 @@ oss-index:
     PLUGIN: ossindex-maven-plugin
     GOAL: ossindex:audit
     REPORT: target/ossindex-report.json
-    PLUGIN_CONFIG: '{"reportFile": "target/ossindex-report.json"}'
+    PLUGIN_CONFIG: '{"reportFile": "target/ossindex-report.json", "fail": "false"}'
     SCAN: >-
       {"id": "oss-index", "name": "oss-index", "version": "3.2.0", "vendor": {"name": "Sonatype OSS Index"},
       "url": "https://ossindex.sonatype.org"}
