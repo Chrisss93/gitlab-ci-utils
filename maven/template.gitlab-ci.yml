@@ -5,6 +5,7 @@ include:
 variables:
   JDK_VERSION: 11
   JOB_IMAGE: maven:3.8.6-openjdk-$JDK_VERSION-slim
+  FF_USE_NEW_BASH_EVAL_STRATEGY: "true"
 
 default:
   image: $JOB_IMAGE
@@ -43,8 +44,7 @@ pmd:
     PLUGIN: maven-pmd-plugin
     GOAL: pmd:check
     REPORT: target/pmd.xml
-    ARTIFACT_EXT: json
-    PLUGIN_EXISTS: (.project.build.plugins.plugin[] | select(.artifactId == \"$PLUGIN\"))
+    PLUGIN_EXISTS: (.project.build.plugins.plugin[] | select(.artifactId == "$PLUGIN"))
     PLUGIN_CONFIG: '{"failOnViolation": "false", "printFailingErrors": "true", "targetDirectory": "target"}'
     YQ_EXPR: >-
       .pmd.file | map( .+@name as $$name | [.violation] | flatten | map(.name |= $$name) ) | flatten | map({
@@ -63,14 +63,13 @@ pmd:
     ISSUES_EXPR: . | length > 0
   script:
     - *install-yq
-    - set +e
     - >-
-      yq -p xml -eoy "$PLUGIN_EXISTS" || (
+      yq -p xml -eoy "$PLUGIN_EXISTS" full-pom.xml || (
         echo "$PLUGIN not configured for this project. Consider adding it or disabling this job." && exit 222
       )
     - yq -p xml -o xml -i "${PLUGIN_EXISTS}.configuration |= . * $PLUGIN_CONFIG" full-pom.xml
     - mvn -f full-pom.xml $GOAL $EXTRA_OPTS
-    - yq -p ${REPORT##*.} -o $ARTIFACT_EXT "$YQ_EXPR" $REPORT > report.json
+    - yq -p ${REPORT##*.} -o ${ARTIFACT_EXT:-json} "$YQ_EXPR" $REPORT > report.json
     - if [ -s report.json ]; then yq -eoy "$ISSUES_EXPR" report.json && exit 222 || true; fi
   artifacts:
     paths:
