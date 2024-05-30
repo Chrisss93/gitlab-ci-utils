@@ -62,6 +62,7 @@ pmd:
       })
     ISSUES_EXPR: . | length > 0
   script:
+    - *install-yq
     - >-
       yq -p xml -eoy "$PLUGIN_EXISTS" || (
         echo "$PLUGIN not configured for this project. Consider adding it or disabling this job." &&
