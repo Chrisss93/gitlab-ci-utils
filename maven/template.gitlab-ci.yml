@@ -347,6 +347,7 @@ deploy:
   stage: deploy
   rules:
     - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
   variables:
     SETTINGS_GITLAB_SERVER: >-
       {"id": "pipeline-gitlab-maven",
@@ -362,13 +363,12 @@ deploy:
       .configuration.skip = true)
   script:
     - *install-yq
-    - touch settings.xml
     # Add gitlab maven repository
-    - yq -i -p xml -o xml ".project.settings.servers.server |= [. // []] + $SETTINGS_GITLAB_SERVER" settings.xml
-    - yq -i -p xml -o xml ".project.repositories.repository |= [. // []] + $POM_GITLAB_URL" full-pom.xml
+    - touch settings.xml
+    - yq -i -p xml -o xml ".settings.servers.server |= [. // []] + $SETTINGS_GITLAB_SERVER" settings.xml
     - >-
       yq -i -p xml -o xml "with(.project.distributionManagement;
-      (.repository, .snapshotRepository) // [] |= $POM_GITLAB_URL
+      (.repository, .snapshotRepository) |= [. //[]] + $POM_GITLAB_URL
       )" full-pom.xml
     # Disable any plugins from earlier phases
     - yq -i -p xml -o xml "$DISABLE_PLUGINS" full-pom.xml
@@ -379,14 +379,13 @@ pages:
   stage: .post
   rules:
     - if: $CI_COMMIT_TAG
+      when: manual
   variables:
     CYCLONE_PLUGIN: '{"groupId": "org.cyclonedx", "artifactId": "cyclonedx-maven-plugin", "version": "2.8.0"}'
   script:
-    - cyclone_found=$(mvn -f full-pom.xml help:effective-pom | grep 'cyclonedx-maven-plugin')
-    - |-
-      if [ -z "$cyclone_found" ];
-        yq -p xml -o xml -i ".project.build.plugins.plugin |= [. // []] + $CYCLONE_PLUGIN" full-pom.xml
-      fi
+    - >-
+      grep 'cyclonedx-maven-plugin' full-pom.xml ||
+      yq -p xml -o xml -i ".project.build.plugins.plugin |= [. // []] + $CYCLONE_PLUGIN" full-pom.xml
     - >-
       mvn -f full-pom.xml cyclonedx:makeAggregateBom
       -DoutputFormat=json -DoutputDirectory=target -DoutputName=bom || true
@@ -440,6 +439,7 @@ pages:
         "description": "Triggered by git tag: $CI_COMMIT_TAG - $CI_COMMIT_TAG_MESSAGE",
         "assets": {"links": .}
       }' assets.json > release.json
+    - yq release.json
     - >-
       curl -X POST -L -v
       -H 'JOB-TOKEN: $CI_JOB_TOKEN' -H 'Content-Type:application/json'
