@@ -66,7 +66,7 @@ pmd:
     - *install-yq
     - >-
       yq -p xml -eoy "$PLUGIN_EXISTS" full-pom.xml || (
-        echo "$PLUGIN not configured for this project. Consider adding it or disabling this job." && exit 222
+        echo "$PLUGIN is not configured for this project. Consider adding it or disabling this job." && exit 222
       )
     - yq -p xml -o xml -i "${PLUGIN_EXISTS}.configuration |= . * $PLUGIN_CONFIG" full-pom.xml
     - mvn -f full-pom.xml $GOAL $EXTRA_OPTS
@@ -105,7 +105,11 @@ spotbugs:
       "type": "issue", "categories": ["BugRisk", "Security"]
       })
   after_script:
-    - mkdir -p target/site && mv target/spotbugs.html target/site
+    - >-
+      if [ -f "target/spotbugs.html" ]; then
+      mkdir -p target/site && mv target/spotbugs.html target/site
+      ; fi
+
 
 checkstyle:
   extends: pmd
@@ -223,7 +227,7 @@ coverage:
   stage: build
   variables:
     PLUGIN: jacoco-maven-plugin
-    GOAL: jacoco:merge jacoco:report
+    GOAL: jacoco:merge compile jacoco:report
     REPORT: target/site/jacoco/jacoco.xml
     PLUGIN_CONFIG: >-
       {"dataFile": "target/jacoco.exec", "formats": "HTML,XML", "outputDirectory": "target/site/jacoco",
@@ -274,10 +278,12 @@ coverage:
         }}
       }
   after_script:
-    - >- 
+    - >-
+      if [ -f "target/jacoco/jacoco.xml" ]; then
       yq '.report.counter[] | select(.+@type == "BRANCH") |
       100 * (.+@covered | to_number) / (.+@covered | to_number) + (.+@missed | to_number) |
       "\(.)" |  sub("(\d+(\.\d{1,2})?).*", "Branch Coverage: ${1}%")' target/jacoco/jacoco.xml
+      ; fi
   coverage: '/^Branch Coverage: (\d+\.?\d+%)$/'
   artifacts:
     reports:
@@ -285,7 +291,6 @@ coverage:
       coverage_report:
         coverage_format: cobertura
         path: report.json
-  allow_failure: false
 
 
 site:
@@ -329,12 +334,13 @@ site:
         yq -p xml -o xml -i ".project.reporting.plugins.plugin = $plugins" full-pom.xml
         mvn -f full-pom.xml surefire-report:report-only # Run in advance due to SUREFIRE-616
 
-        # Prepare site descriptor
-        curl -L $CI_SERVER_URL/ci/-/archive/fix/ci-fix.tar.gz | tar xvz -C /tmp
-        cp -nr /tmp/ci-fix/maven/site .
+        # Get a pre-prepared site descriptor from CI pipeline repo
+        curl -L -H 'JOB-TOKEN: $CI_JOB_TOKEN' \
+        $CI_API_V4_URL/projects/chrisss93%2Fci/repository/archive?path=maven/site&sha=fix | \
+        tar xzv -C src --strip-components 2
+
         site_links=$(echo "$LINKS" | yq -o json '. | map({"+@name": .name, "+@href": .href})')
-        yq -p xml -o xml -i ".project.body.links.item |= [. // []] + $site_links" site/site.xml
-        mv site src
+        yq -p xml -o xml -i ".project.body.links.item |= [. // []] + $site_links" src/site/site.xml
         ln -s ../../../README.md src/site/markdown/README.md
       fi
     - mvn -f full-pom.xml site:site $SITE_OPTS
@@ -441,8 +447,7 @@ pages:
       }' assets.json > release.json
     - yq release.json
     - >-
-      curl -X POST -L -v
-      -H 'JOB-TOKEN: $CI_JOB_TOKEN' -H 'Content-Type:application/json'
+      curl -L -X POST -H 'JOB-TOKEN: $CI_JOB_TOKEN' -H 'Content-Type:application/json'
       -d @release.json
       $CI_API_V4_URL/projects/$CI_PROJECT_ID/releases
   artifacts:
