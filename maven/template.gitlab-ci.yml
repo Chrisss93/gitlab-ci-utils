@@ -3,8 +3,8 @@ include:
     file: docker.gitlab-ci.yml
 
 variables:
-  JDK_VERSION: 11
-  JOB_IMAGE: maven:3.8.6-openjdk-$JDK_VERSION-slim
+  JDK_VERSION: 17
+  JOB_IMAGE: maven:3.8-openjdk-$JDK_VERSION-slim
   FF_USE_NEW_BASH_EVAL_STRATEGY: "true"
 
 default:
@@ -13,8 +13,12 @@ default:
     - key: $CI_PROJECT_PATH-maven-repository
       paths:
         - $CI_PROJECT_DIR/.m2/repository
-        - /usr/local/sbin
+      when: always
       unprotect: true
+    - key: $CI_PROJECT_PATH-bins
+      paths:
+        - /usr/local/sbin
+      when: always
 
 stages:
   - check
@@ -24,9 +28,6 @@ stages:
 
 setup:
   stage: .pre
-  variables:
-    PLUGIN_FOUND: (.project.build.plugins.plugin[] | select(.artifactId == "$PLUGIN"))
-    PLUGINS: maven-pmd-plugin spotbugs-maven-plugin maven-checkstyle-plugin ossindex-maven-plugin jacoco-maven-plugin
   script:
     - mvn help:effective-pom -Doutput=full-pom.xml
     - &install-yq >-
@@ -73,23 +74,24 @@ pmd:
     - if [ -s report.json ]; then yq -eoy "$ISSUES_EXPR" report.json && exit 222 || true; fi
   artifacts:
     paths:
-      - site/**
+      - target/site
       - $REPORT
     reports:
       codequality: report.json
   allow_failure:
     exit_codes: 222
 
-# Perhaps makes more sense to convert this to a SAST report instead of codequality?
+# Perhaps makes more sense to convert this to a SAST report for Ultimate users instead of codequality?
 spotbugs:
   extends: pmd
   stage: check
   variables:
     PLUGIN: spotbugs-maven-plugin
-    GOAL: compile spotbugs:check
+    GOAL: test-compile spotbugs:check
     REPORT: target/spotbugsXml.xml
     PLUGIN_CONFIG: >- 
-      {"spotbugsXmlOutputFilename": "spotbugsXml.xml", "spotbugsXmlOutputDirectory": "target", "failOnError": "false"}
+      {"spotbugsXmlOutputFilename": "spotbugsXml.xml", "spotbugsXmlOutputDirectory": "target", "htmlOutput": "true",
+      "failOnError": "false"}
     YQ_EXPR: >-
       .BugCollection.BugInstance | map( . as $$bug | [.SourceLine] | flatten | filter(.+@primary).[0] | {
       "check_name": "SpotBugs \($$bug.+@category): \($$bug.+@type)", "description": $$bug.ShortMessage,
@@ -102,7 +104,8 @@ spotbugs:
       )),
       "type": "issue", "categories": ["BugRisk", "Security"]
       })
-
+  after_script:
+    - mkdir -p target/site && mv target/spotbugs.html target/site
 
 checkstyle:
   extends: pmd
@@ -209,17 +212,7 @@ integration-tests:
 # This is especially silly that we must transform a popular coverage tooling format (jacoco) into a dead, barely
 # documented format (cobertura).  But gitlab does not yet support jacoco coverage format.
 # See: https://gitlab.com/gitlab-org/gitlab/-/issues/227345
-
 # TODO:
-#  X Figure out if gitlab can re-run this coverage job if/when the manual upstream job integration-tests is run.
-#    This would mean we would have two jacoco.exec files, which would need to be merged so we could get the
-#    complete coverage.
-#  ✓ In order for the upstream jobs to even export their jacoco.exec files in the first place, the job needs to
-#    anticipate where those files will be found.  Might need to inspect the pom and/or manually set the configuration
-#    values to ensure a predictable file location. Ugh...
-#  ✓ Continue refining the YQ_EXPR.  Nearly there, but not all lines are appearing (ie. JetStreamSinkWriterMetrics)
-#  ✓ Recheck pom.xml and make sure you understand the conditions for surefire and jacoco plugins to work while both
-#    using the argLine.
 #  * The PMD job (and all extensions) suffer from the issue that we change the plugin config, but if the pom.xml
 #    for that plugin specifies specific configuration in individual execution blocks, our config will be ignored.
 #    We can instead target the plugin config to specific execution blocks, but this means adding another parameter to
@@ -227,7 +220,7 @@ integration-tests:
 
 coverage:
   extends: pmd
-  stage: test
+  stage: build
   variables:
     PLUGIN: jacoco-maven-plugin
     GOAL: jacoco:merge jacoco:report
@@ -285,9 +278,6 @@ coverage:
       yq '.report.counter[] | select(.+@type == "BRANCH") |
       100 * (.+@covered | to_number) / (.+@covered | to_number) + (.+@missed | to_number) |
       "\(.)" |  sub("(\d+(\.\d{1,2})?).*", "Branch Coverage: ${1}%")' target/jacoco/jacoco.xml
-  needs:
-    - unit-tests
-    - integration-tests
   coverage: '/^Branch Coverage: (\d+\.?\d+%)$/'
   artifacts:
     reports:
@@ -296,6 +286,61 @@ coverage:
         coverage_format: cobertura
         path: report.json
   allow_failure: false
+
+
+site:
+  stage: build
+  variables:
+    REPORTS: >-
+      dependencies dependency-convergence dependency-info dependency-management
+      distribution-management licenses plugins summary
+    REPORT_PLUGINS: >-
+      [
+        {
+          "groupId": "org.apache.maven.plugins",
+          "artifactId": "maven-project-info-reports-plugin",
+          "version": "3.5.0",
+          "reportSets": {"reportSet": [ {"reports": . | split(" ") | {"report": .}} ]}
+        },
+        {
+          "groupId": "org.apache.maven.plugins",
+          "artifactId": "maven-javadoc-plugin",
+          "version": "3.7.0",
+          "reportSets": {"reportSet": [ {"reports": {"report": ["javadoc", "test-javadoc"]}} ]}
+        },
+        {
+          "groupId": "org.apache.maven.plugins",
+          "artifactId": "maven-surefire-report-plugin",
+          "version": "3.2.5",
+          "configuration": {"skipSurefireReport": true},
+          "reportSets": {"reportSet": [ {"reports": [{"report": "report-only"}]} ]}
+        }
+      ]
+    SITE_PLUGIN: (.project.build.plugins.plugin[] | select(.artifactId == "maven-site-plugin"))
+    SITE_DEPS: '{"groupId": "org.sentrysoftware.maven", "artifactId": "maven-skin-tools", "version": "1.3.00"}'
+  script:
+    - *install-yq
+    - |-
+      if [ ! -d "src/site" ]; then
+        echo "Making custom maven site"
+
+        yq -p xml -o xml -i "${SITE_PLUGIN}.dependencies.dependency |= [. // []] + $SITE_DEPS" full-pom.xml
+        plugins=$(echo "$REPORTS" | yq -o json "$REPORT_PLUGINS")
+        yq -p xml -o xml -i ".project.reporting.plugins.plugin = $plugins" full-pom.xml
+        mvn -f full-pom.xml surefire-report:report-only # Run in advance due to SUREFIRE-616
+
+        # Prepare site descriptor
+        curl -L $CI_SERVER_URL/ci/-/archive/fix/ci-fix.tar.gz | tar xvz -C /tmp
+        cp -nr /tmp/ci-fix/maven/site .
+        site_links=$(echo "$LINKS" | yq -o json '. | map({"+@name": .name, "+@href": .href})')
+        yq -p xml -o xml -i ".project.body.links.item |= [. // []] + $site_links" site/site.xml
+        mv site src
+        ln -s ../../../README.md src/site/markdown/README.md
+      fi
+    - mvn -f full-pom.xml site:site $SITE_OPTS
+  artifacts:
+    paths:
+      - target/site
 
 
 deploy:
@@ -307,13 +352,99 @@ deploy:
       {"id": "pipeline-gitlab-maven",
       "configuration": {"httpHeaders": {"property": {"name": "Job-Token", "value": "$CI_JOB_TOKEN"}}}
       }
-    POM_GITLAB_URL: '{"id": "pipeline-gitlab-maven", "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven}'
+    POM_GITLAB_URL: '{"id": "pipeline-gitlab-maven", "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven"}'
+    DISABLE_PLUGINS: >-
+      with(.project.build.plugins.plugin[];
+      select(.artifactId as $$a | [
+        "maven-pmd-plugin", "spotbugs-maven-plugin", "maven-checkstyle-plugin", "ossindex-maven-plugin", 
+        "jacoco-maven-plugin", "maven-surefire-plugin", "maven-failsafe-plugin"] |
+        any_c(. == $$a)) |
+      .configuration.skip = true)
   script:
     - *install-yq
-    - if [ -f "settings.xml" ] || touch settings.xml
-    - yq -i -p xml -o xml ".project.settings.servers.server |= (. // []) + $SETTINGS_GITLAB_SERVER" settings.xml
-    - yq -i -p xml -o xml ".project.repositories.repository |= (. // []) + $POM_GITLAB_URL" full-pom.xml
-    - yq -i -p xml -o xml ".project.distributionManagement.repository |= (. // []) + $POM_GITLAB_URL" full-pom.xml
-    - yq -i -p xml -o xml ".project.distributionManagement.snapshotRepository |= (. // []) + $POM_GITLAB_URL" full-pom.xml
-    - mvn -s settings.xml deploy
+    - touch settings.xml
+    # Add gitlab maven repository
+    - yq -i -p xml -o xml ".project.settings.servers.server |= [. // []] + $SETTINGS_GITLAB_SERVER" settings.xml
+    - yq -i -p xml -o xml ".project.repositories.repository |= [. // []] + $POM_GITLAB_URL" full-pom.xml
+    - >-
+      yq -i -p xml -o xml "with(.project.distributionManagement;
+      (.repository, .snapshotRepository) // [] |= $POM_GITLAB_URL
+      )" full-pom.xml
+    # Disable any plugins from earlier phases
+    - yq -i -p xml -o xml "$DISABLE_PLUGINS" full-pom.xml
+    - mvn -f full-pom.xml -s settings.xml deploy
 
+
+pages:
+  stage: .post
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    CYCLONE_PLUGIN: '{"groupId": "org.cyclonedx", "artifactId": "cyclonedx-maven-plugin", "version": "2.8.0"}'
+  script:
+    - cyclone_found=$(mvn -f full-pom.xml help:effective-pom | grep 'cyclonedx-maven-plugin')
+    - |-
+      if [ -z "$cyclone_found" ];
+        yq -p xml -o xml -i ".project.build.plugins.plugin |= [. // []] + $CYCLONE_PLUGIN" full-pom.xml
+      fi
+    - >-
+      mvn -f full-pom.xml cyclonedx:makeAggregateBom
+      -DoutputFormat=json -DoutputDirectory=target -DoutputName=bom || true
+    - mv target/site public
+    - |-
+      if [ ! -f "public/index.html" ]; then
+      if [ -f "public/summary.html" ]; then cp public/summary.html public/index.html
+      elif [-f "public/README.html" ]; then cp public/README.html public/index.html
+      fi
+      fi
+    - >-
+      if [ -f "public/jacoco/jacoco.xml" ]; then mv public/jacoco/jacoco.xml target && printf '{
+        "name": "Test Coverage",
+        "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/target/jacoco.xml"
+      }\n' >> assets.json
+      ; fi
+    - >- 
+      if [ -f "target/ossindex-report.json" ]; then printf '{
+        "name": "Dependency Vulnerability Report",
+        "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/target/ossindex-report.json"
+      }\n' >> assets.json
+      ; fi
+    - >- 
+      if [ -f "target/pmd.xml" ]; then printf '{
+        "name": "Source Code Analysis",
+        "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/target/pmd.xml"
+      }\n' >> assets.json
+      ; fi
+    - >- 
+      if [ -f "target/spotbugsXml.xml" ]; then printf '{
+        "name": "Byte Code Analysis",
+        "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/target/spotbugsXml.xml"
+      }\n' >> assets.json
+      ; fi
+    - >- 
+      if [ -f "target/checkstyle.xml" ]; then printf '{
+        "name": "Code Lint",
+        "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/target/checkstyle.xml"
+      }\n' >> assets.json
+      ; fi
+    - >-
+      if [ -f "target/bom.json" ]; then printf '{
+        "name": "Software Bill of Materials",
+        "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$CI_JOB_ID/artifacts/target/bom.json"
+      }\n' >> assets.json
+      ; fi
+    - >-
+      tag=${CI_COMMIT_TAG#v} yq eval-all '[.] | {
+        "name": env(tag),
+        "tag_name": "$CI_COMMIT_TAG",
+        "description": "Triggered by git tag: $CI_COMMIT_TAG - $CI_COMMIT_TAG_MESSAGE",
+        "assets": {"links": .}
+      }' assets.json > release.json
+    - >-
+      curl -X POST -L -v
+      -H 'JOB-TOKEN: $CI_JOB_TOKEN' -H 'Content-Type:application/json'
+      -d @release.json
+      $CI_API_V4_URL/projects/$CI_PROJECT_ID/releases
+  artifacts:
+    paths:
+      - target/*.{xml,json}

@@ -1,6 +1,4 @@
-# A pipeline template designed for rust projects in which there is a Cargo.toml file along with its Cargo.lock
-# file in the project root. The Cargo.toml must specify a binary named `app`, which will be compiled by
-# different jobs for different target-triples.
+# A pipeline template designed for rust projects.  Biased towards the x86_64-unknown-linux-gnu target triple.
 #
 # In order to mandate audits on project dependencies, include this pipeline and create a job extending
 # the .dep-audit job. For this to work, the project's Cargo.toml file must add the entry below:
@@ -19,14 +17,10 @@
 # decision but some trial and error is required to see which dependencies slow down the build the most and how large
 # their compiled artifacts are.  Note: compilation is a complex beast - just because cargo timings shows the crate A
 # dependency takes 15 seconds compile doesn't mean the build will speed up by a commensurate amount if you choose to 
-# cache A.
+# cache crate A.
 
 # TODO
-# * Test to see if this generalizes to multi-package workspace projects
-# * Remove dumb restriction that a project's binary must be exactly named "app"
-# ✓ Test cache-crates.sh to make sure the logic works as intended
 # * Complete the benchmark job (target the load_testing report artifact)
-# * Should we consider an optional cargo-miri job in the check stage and push results to the SAST artifact report?
 # * Cargo may force recompilation due to docker mounted volumes having filesystems with differen mtime precision
 #   It depends on how gitlab project files in containers during jobs. Will need to test.
 
@@ -248,7 +242,7 @@ cargo-deny:
       - $CARGO_HOME/bin
 
 
-.cargo-vet:
+cargo-vet:
   stage: check
   variables:
     CODE_CLIMATE: |-
@@ -459,13 +453,16 @@ compile:linux-gnu:
       cargo metadata --format-version 1 --no-deps |
       jq -e '.packages[].targets[] | select(.kind | contains(["bin"]))' ||
       (echo "No binaries to build" && exit 0)
-    - ./cache-crates.sh load target/release target/crate-release-cache
+    - ./cache-crates.sh load target/$CARGO_BUILD_TARGET/release target/crate-release-cache
     - cargo build --release --locked --timings
-    - ./cache-crates.sh save target/release target/crate-release-cache normal $CRATES
+    - ./cache-crates.sh save target/$CARGO_BUILD_TARGET/release target/crate-release-cache normal $CRATES
     - mv target/cargo-timings/cargo-timing.html target/cargo-timings/$CARGO_BUILD_TARGET.html
-    # TODO: Don't assume binaries are named "app".  Nor assume there is only be 1 binary generated from cargo build
     - mkdir -p binaries
-    - tar czvf binaries/$CARGO_BUILD_TARGET.tar.gz target/$CARGO_BUILD_TARGET/release/app
+    - >-
+      cargo metadata --format-version 1 --no-deps |
+      jq -r ".packages[].targets[] | select(.kind | contains([\"bin\"])) |
+        \"target/$CARGO _BUILD_TARGET/release/\" + .name" |
+      tar czvf binaries/$CARGO_BUILD_TARGET.tar.gz -T -
     # Upload binary to package registry if the pipeline was triggered by a git tag
     - '[ -z "$CI_COMMIT_TAG" ] && exit 0'
     - url=$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/binary/${CI_COMMIT_TAG#v}/$(ls binaries)
@@ -508,25 +505,24 @@ compile:linux-gnu:
 
 
 .compile:windows:
-  extends: compile:linux-musl
+  extends: .compile:linux-musl
   variables:
     CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
     RUSTFLAGS: -C linker=x86_64-w64-mingw32-gcc -C ar=/usr/x86_64-w64-mingw32/bin/ar
-  after_script:
-    - rm -r binaries/$CARGO_BUILD_TARGET.tar.gz
-    - zip binaries/$CARGO_BUILD_TARGET.zip target/$CARGO_BUILD_TARGET/release/app.exe
+  script:
+    - !reference [compile:linux-gnu, script]
+    - rm -f binaries/$CARGO_BUILD_TARGET.tar.gz
+    - >-
+      cargo metadata --format-version 1 --no-deps |
+      jq -r ".packages[].targets[] | select(.kind | contains([\"bin\"])) |
+        \"target/$CARGO _BUILD_TARGET/release/\" + .name" |
+      zip binaries/$CARGO_BUILD_TARGET.zip -@
 
 
-.compile:linux-aarch64
-  extends: compile:linux-musl
+.compile:linux-aarch64:
+  extends: compile:linux-gnu
   variables:
     CARGO_BUILD_TARGET: aarch64-unknown-linux-gnu
-    RUSTFLAGS: ''
-
-.compile:wasm
-  extends: compile:linux-musl
-  variables:
-    CARGO_BUILD_TARGET: wasm32-unknown-unknown
     RUSTFLAGS: ''
 
 
@@ -575,6 +571,7 @@ compile:linux-gnu:
   image: alpine:3.18
   rules:
     - when: manual
+  allow_failure: true
   script:
     - mkdir -p target/crate-test-cache target/crate-release-cache
   parallel:
@@ -586,7 +583,6 @@ compile:linux-gnu:
     - <<: *crate-release-cache
       key: $CI_PROJECT_PATH-release-cache-$JOB_CACHE_NAME
       policy: push
-  allow_failure: true
   dependencies: []
 
 
@@ -620,6 +616,7 @@ pages:
     - *binstall
     - which cargo-about || cargo binstall -y cargo-about@0.6.1
     # - which mdbook || cargo binstall -y mdbook@0.4.35
+    - which tree || apt-get update && apt-get-install -y --no-install-recommends tree
   script:
     - 'echo "Creating gitlab release: ${CI_COMMIT_TAG#v}"'
     - mkdir -p public
@@ -628,7 +625,7 @@ pages:
     # -  mdbook build -d public/book dev/book && tar czf book.tar.gz public/book
     - tar czf coverage.tar.gz target/llvm-cov/html
     - >-
-      jq -s --arg tag "${CI_COMMIT_TAGs#v}" --argjson assets "$ASSETS" '
+      jq -s --arg tag "${CI_COMMIT_TAG#v}" --argjson assets "$ASSETS" '
       {
         "name": "$tag",
         "tag_name": "$CI_COMMIT_TAG",
@@ -653,7 +650,7 @@ pages:
       s|__STUB_SOURCE_URL__|$CI_PROJECT_URL|g;
       s|__STUB_RELEASE_URL__|$CI_PROJECT_URL/-/releases/${CI_COMMIT_TAG#v}|g;
       s|__STUB_PIPELINE_URL__|$CI_PIPELINE_URL|g;
-      s|__STUB_DOC_URL__|docs/app|g;
+      s|__STUB_DOC_URL__|docs|g;
       s|__STUB_LICENSE_URL__|licenses.html|g;
       s|__STUB_COVERAGE_URL__|test-coverage/index.html|g;
       s|__STUB__TIMING__URL__|build-time.html|e;"
