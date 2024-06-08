@@ -223,7 +223,7 @@ integration-tests:
 #    for that plugin specifies specific configuration in individual execution blocks, our config will be ignored.
 #    We can instead target the plugin config to specific execution blocks, but this means adding another parameter to
 #    know which goal to create/update the execution configuration for.
-
+#  * The sources entry may not be accurate for multi-module projects...
 coverage:
   extends: pmd
   stage: build
@@ -251,21 +251,21 @@ coverage:
         "+@timestamp": [.sessioninfo] | flatten | map(.+@start | to_number) | max,
         "sources": { "source": ["${CI_PROJECT_DIR}/src/main/java"] },
         "packages": { "package": .package | map(
-          ([.sourcefile] | flatten | filter(has("line"))) as $src |
-          ([.class] | flatten | filter(has("method"))) as $class | { $ATTRS
+          ([.sourcefile] | flatten | filter(has("line"))) as $$src |
+          ([.class] | flatten | filter(has("method"))) as $$class | { $ATTRS
           "+@name": .+@name | sub("/", "."),
-          "classes": { "class": $class | map( .+@sourcefilename as $name | { $ATTRS
+          "classes": { "class": $$class | map( .+@sourcefilename as $$name | { $ATTRS
             "+@name": .+@name | sub("/", "."),
-            "+@filename": (.+@name | sub("(.+/).*", "${1}")) + $name,
+            "+@filename": (.+@name | sub("(.+/).*", "$${1}")) + $$name,
             "methods": { "method": [.method] | flatten | map(
-              (.+@line | to_number) as $line |
-              ($class | filter(.+@sourcefilename == $name) |
+              (.+@line | to_number) as $$line |
+              ($$class | filter(.+@sourcefilename == $$name) |
                 map([.method]) | flatten |
-                map(.+@line | to_number) | filter(. > $line) | min) as $nextMethodLine | { $ATTRS
+                map(.+@line | to_number) | filter(. > $$line) | min) as $$nextMethodLine | { $ATTRS
               "+@name": .+@name, "+@signature": .+@desc,
               "lines": { "line":
-                $src | filter(.+@name == $name) | [.[].line] | flatten | map(.+@nr |= to_number) |
-                filter( .+@nr >= $line and (.+@nr < $nextMethodLine or $nextMethodLine == null) ) |
+                $$src | filter(.+@name == $$name) | [.[].line] | flatten | map(.+@nr |= to_number) |
+                filter( .+@nr >= $$line and (.+@nr < $$nextMethodLine or $$nextMethodLine == null) ) |
                 map({
                   "+@number": .+@nr,
                   "+@hits": .+@ci | to_number | with(select(. > 0); 1) | with(select(. == 0); 0),
@@ -279,6 +279,8 @@ coverage:
         })
         }}
       }
+  before_script:
+    - echo "$YQ_EXPR"
   after_script:
     - >-
       if [ -f "target/jacoco/jacoco.xml" ]; then
