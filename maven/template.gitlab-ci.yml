@@ -5,8 +5,8 @@ include:
 variables:
   JDK_VERSION: 17
   JOB_IMAGE: maven:3.9-eclipse-temurin-$JDK_VERSION-alpine
-  FF_USE_NEW_BASH_EVAL_STRATEGY: "true"
   MAVEN_ARGS: -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository
+  FF_USE_NEW_BASH_EVAL_STRATEGY: "true"
 
 default:
   image: $JOB_IMAGE
@@ -337,10 +337,8 @@ site:
         mvn -f full-pom.xml surefire-report:report-only # Run in advance due to SUREFIRE-616
 
         # Get a pre-prepared site descriptor from CI pipeline repo
-        curl -vv -L -H 'JOB-TOKEN: $CI_JOB_TOKEN' $CI_API_V4_URL/projects/chrisss93%2Fci/repository/archive?path=maven/site&sha=fix > thing.tar.gz
-        ls -alh
-        curl -L -H 'JOB-TOKEN: $CI_JOB_TOKEN' \
-        $CI_API_V4_URL/projects/chrisss93%2Fci/repository/archive?path=maven/site&sha=fix | \
+        curl -L -H "JOB-TOKEN: $CI_JOB_TOKEN" \
+        "$CI_API_V4_URL/projects/chrisss93%2Fci/repository/archive?path=maven/site&sha=fix" | \
         tar xzv -C src --strip-components 2
 
         site_links=$(echo "$LINKS" | yq -o json '. | map({"+@name": .name, "+@href": .href})')
