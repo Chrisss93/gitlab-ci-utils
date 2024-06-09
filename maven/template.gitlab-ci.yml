@@ -75,11 +75,13 @@ pmd:
     - yq -p ${REPORT##*.} -o ${ARTIFACT_EXT:-json} "$YQ_EXPR" $REPORT > report.json
     - if [ -s report.json ]; then yq -eoy -p ${ARTIFACT_EXT:-json} "$ISSUES_EXPR" report.json && exit 222 || true; fi
   artifacts:
+    expose_as: $GOAL
     paths:
       - target/site
       - $REPORT
     reports:
       codequality: report.json
+    when: always
   allow_failure:
     exit_codes: 222
 
@@ -191,6 +193,7 @@ unit-tests:
     when: always
     paths:
       - target/jacoco
+      - target/**/TEST-*.xml
     reports:
       junit: target/**/TEST-*.xml
 
@@ -226,7 +229,7 @@ integration-tests:
 #  * The sources entry may not be accurate for multi-module projects...
 coverage:
   extends: pmd
-  stage: build
+  stage: test
   variables:
     PLUGIN: jacoco-maven-plugin
     GOAL: jacoco:merge compile jacoco:report
@@ -280,11 +283,12 @@ coverage:
         }}
       }
   after_script:
+    - export PATH=$(pwd)/.pipeline-bins:$PATH
     - >-
       if [ -f "target/site/jacoco/jacoco.xml" ]; then
       yq '.report.counter[] | select(.+@type == "BRANCH") |
       100 * (.+@covered | to_number) / (.+@covered | to_number) + (.+@missed | to_number) |
-      "\(.)" |  sub("(\d+(\.\d{1,2})?).*", "Branch Coverage: ${1}%")' target/site/jacoco/jacoco.xml
+      "\(.)" |  sub("(\d+(\.\d{1,2})?).*", "Branch Coverage: ${1}%\n")' target/site/jacoco/jacoco.xml
       ; fi
   coverage: '/^Branch Coverage: (\d+\.?\d+%)$/'
   artifacts:
@@ -293,6 +297,10 @@ coverage:
       coverage_report:
         coverage_format: cobertura
         path: report.json
+  needs:
+    - setup
+    - unit-tests
+    - integration-tests
 
 
 site:
@@ -347,6 +355,7 @@ site:
       fi
     - mvn -f full-pom.xml site:site $SITE_OPTS
   artifacts:
+    expose_as: website
     paths:
       - target/site
 
@@ -362,7 +371,7 @@ deploy:
         "configuration": {"httpHeaders": {"property": {"name": "Job-Token", "value": "$CI_JOB_TOKEN"}}}
       }
     GITLAB_PROFILE: >-
-      .project.build.plugins.plugin as $plugins |
+      .project.build.plugins.plugin as $$plugins |
       .project.profiles.profile |= [. // []] +
       { "id": "gitlab-pipeline",
         "distributionManagement": {
@@ -374,9 +383,9 @@ deploy:
             ["maven-install-plugin", "maven-surefire-plugin", "maven-failsafe-plugin"] |
             map({"artifactId": ., "groupId": "org.apache.maven.plugins", "configuration": {"skip": true}})
           ) + (
-            $plugins | filter(.artifactId as $a |
+            $$plugins | filter(.artifactId as $$a |
               ["maven-pmd", "spotbugs-maven", "maven-checkstyle", "ossindex-maven", "jacoco-maven"] |
-              any_c(. + "-plugin" == $a)
+              any_c(. + "-plugin" == $$a)
             ) | map(.configuration = {"skip": true})
           ) + {
             "groupId": "org.cyclonedx", "artifactId": "cyclonedx-maven-plugin", "version": "2.8.0",
@@ -397,6 +406,7 @@ deploy:
       mvn -s settings.xml -P $profile deploy
       done
   artifacts:
+    expose_as: supply-chain
     paths:
       - target/bom.json
 
