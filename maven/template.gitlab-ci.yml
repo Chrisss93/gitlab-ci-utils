@@ -73,7 +73,7 @@ pmd:
     - yq -p xml -o xml -i "${PLUGIN_EXISTS}.configuration |= . * $PLUGIN_CONFIG" full-pom.xml
     - mvn -f full-pom.xml $GOAL $EXTRA_OPTS
     - yq -p ${REPORT##*.} -o ${ARTIFACT_EXT:-json} "$YQ_EXPR" $REPORT > report.json
-    - if [ -s report.json ]; then yq -eoy "$ISSUES_EXPR" report.json && exit 222 || true; fi
+    - if [ -s report.json ]; then yq -eoy -p ${ARTIFACT_EXT:-json} "$ISSUES_EXPR" report.json && exit 222 || true; fi
   artifacts:
     paths:
       - target/site
@@ -279,14 +279,12 @@ coverage:
         })
         }}
       }
-  before_script:
-    - echo "$YQ_EXPR"
   after_script:
     - >-
-      if [ -f "target/jacoco/jacoco.xml" ]; then
+      if [ -f "target/site/jacoco/jacoco.xml" ]; then
       yq '.report.counter[] | select(.+@type == "BRANCH") |
       100 * (.+@covered | to_number) / (.+@covered | to_number) + (.+@missed | to_number) |
-      "\(.)" |  sub("(\d+(\.\d{1,2})?).*", "Branch Coverage: ${1}%")' target/jacoco/jacoco.xml
+      "\(.)" |  sub("(\d+(\.\d{1,2})?).*", "Branch Coverage: ${1}%")' target/site/jacoco/jacoco.xml
       ; fi
   coverage: '/^Branch Coverage: (\d+\.?\d+%)$/'
   artifacts:
@@ -358,46 +356,57 @@ deploy:
   rules:
     - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   variables:
-    SETTINGS_GITLAB_SERVER: >-
-      {"id": "pipeline-gitlab-maven",
-      "configuration": {"httpHeaders": {"property": {"name": "Job-Token", "value": "$CI_JOB_TOKEN"}}}
+    PROFILES:
+    GITLAB_SETTINGS: >-
+      { "id": "gitlab-maven",
+        "configuration": {"httpHeaders": {"property": {"name": "Job-Token", "value": "$CI_JOB_TOKEN"}}}
       }
-    POM_GITLAB_URL: '{"id": "pipeline-gitlab-maven", "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven"}'
-    DISABLE_PLUGINS: >-
-      with(.project.build.plugins.plugin[];
-      select(.artifactId as $$a | [
-        "maven-pmd-plugin", "spotbugs-maven-plugin", "maven-checkstyle-plugin", "ossindex-maven-plugin", 
-        "jacoco-maven-plugin", "maven-surefire-plugin", "maven-failsafe-plugin"] |
-        any_c(. == $$a)) |
-      .configuration.skip = true)
+    GITLAB_PROFILE: >-
+      .project.build.plugins.plugin as $plugins |
+      .project.profiles.profile |= [. // []] +
+      { "id": "gitlab-pipeline",
+        "distributionManagement": {
+          "repository": {"id": "gitlab-maven", "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven"},
+          "snapshotRepository": {"id": "gitlab-maven", "url": "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven"}
+        },
+        "build": {"plugins": {"plugin":
+          (
+            ["maven-install-plugin", "maven-surefire-plugin", "maven-failsafe-plugin"] |
+            map({"artifactId": ., "groupId": "org.apache.maven.plugins", "configuration": {"skip": true}})
+          ) + (
+            $plugins | filter(.artifactId as $a |
+              ["maven-pmd", "spotbugs-maven", "maven-checkstyle", "ossindex-maven", "jacoco-maven"] |
+              any_c(. + "-plugin" == $a)
+            ) | map(.configuration = {"skip": true})
+          ) + {
+            "groupId": "org.cyclonedx", "artifactId": "cyclonedx-maven-plugin", "version": "2.8.0",
+            "configuration": {"outputFormat": "json", "outputDirectory": "target", "outputName": "bom"}
+          }
+        }}
+      }
   script:
     - *install-yq
     # Add gitlab maven repository
     - touch settings.xml
-    - yq -i -p xml -o xml ".settings.servers.server |= [. // []] + $SETTINGS_GITLAB_SERVER" settings.xml
-    - >-
-      yq -i -p xml -o xml "with(.project.distributionManagement;
-      (.repository, .snapshotRepository) |= [. //[]] + $POM_GITLAB_URL
-      )" full-pom.xml
-    # Disable any plugins from earlier phases
-    - yq -i -p xml -o xml "$DISABLE_PLUGINS" full-pom.xml
-    - mvn -f full-pom.xml -s settings.xml deploy
+    - yq -i -p xml -o xml ".settings.servers.server |= [. // []] + $GITLAB_SETTINGS" settings.xml
+    - yq -i -p xml -o xml "$GITLAB_PROFILE" pom.xml
+    - mvn help:all-profiles
+    - |-
+      for profile in gitlab-pipeline $PROFILES
+      do echo "Deploying with profile: $profile"
+      mvn -s settings.xml -P $profile deploy
+      done
+  artifacts:
+    paths:
+      - target/bom.json
 
 
 pages:
   stage: .post
   rules:
     - if: $CI_COMMIT_TAG
-  variables:
-    CYCLONE_PLUGIN: '{"groupId": "org.cyclonedx", "artifactId": "cyclonedx-maven-plugin", "version": "2.8.0"}'
   script:
     - *install-yq
-    - >-
-      grep 'cyclonedx-maven-plugin' full-pom.xml ||
-      yq -p xml -o xml -i ".project.build.plugins.plugin |= [. // []] + $CYCLONE_PLUGIN" full-pom.xml
-    - >-
-      mvn -f full-pom.xml cyclonedx:makeAggregateBom
-      -DoutputFormat=json -DoutputDirectory=target -DoutputName=bom || true
     - mv target/site public
     - |-
       if [ ! -f "public/index.html" ]; then
