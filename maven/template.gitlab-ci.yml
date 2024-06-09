@@ -77,7 +77,7 @@ pmd:
   artifacts:
     expose_as: report
     paths:
-      - target/site
+      - target/site/
       - $REPORT
     reports:
       codequality: report.json
@@ -192,10 +192,12 @@ unit-tests:
   artifacts:
     when: always
     paths:
-      - target/jacoco
+      - target/jacoco/
       - target/**/TEST-*.xml
     reports:
       junit: target/**/TEST-*.xml
+  needs:
+    - setup
 
 
 integration-tests:
@@ -216,7 +218,8 @@ integration-tests:
     - mvn -f full-pom.xml integration-test $TEST_OPTS
   rules:
     - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-    - when: manual
+    - if: $CI_MERGE_REQUEST_ID
+      when: manual
 
 # This is especially silly that we must transform a popular coverage tooling format (jacoco) into a dead, barely
 # documented format (cobertura).  But gitlab does not yet support jacoco coverage format.
@@ -300,7 +303,8 @@ coverage:
   needs:
     - setup
     - unit-tests
-    - integration-tests
+    - job: integration-tests
+      optional: true
 
 
 site:
@@ -357,11 +361,11 @@ site:
   artifacts:
     expose_as: website
     paths:
-      - target/site
+      - target/site/
 
 
 deploy:
-  stage: deploy
+  stage: build
   rules:
     - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   variables:
@@ -409,6 +413,9 @@ deploy:
     expose_as: supply-chain
     paths:
       - target/bom.json
+  needs:
+    - job: coverage
+      artifacts: false
 
 
 pages:
@@ -461,13 +468,11 @@ pages:
       }\n' >> assets.json
       ; fi
     - >-
-      tag=${CI_COMMIT_TAG#v} yq eval-all '[.] | {
-        "name": env(tag),
+      yq eval-all '[.] | {
         "tag_name": "$CI_COMMIT_TAG",
         "description": "Triggered by git tag: $CI_COMMIT_TAG - $CI_COMMIT_TAG_MESSAGE",
         "assets": {"links": .}
       }' assets.json > release.json
-    - yq release.json
     - >-
       curl -L -X POST -H 'JOB-TOKEN: $CI_JOB_TOKEN' -H 'Content-Type:application/json'
       -d @release.json
@@ -475,3 +480,4 @@ pages:
   artifacts:
     paths:
       - target/*.{xml,json}
+      - release.json
