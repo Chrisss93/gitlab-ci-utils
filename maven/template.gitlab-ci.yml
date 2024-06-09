@@ -75,7 +75,7 @@ pmd:
     - yq -p ${REPORT##*.} -o ${ARTIFACT_EXT:-json} "$YQ_EXPR" $REPORT > report.json
     - if [ -s report.json ]; then yq -eoy -p ${ARTIFACT_EXT:-json} "$ISSUES_EXPR" report.json && exit 222 || true; fi
   artifacts:
-    expose_as: $GOAL
+    expose_as: report
     paths:
       - target/site
       - $REPORT
