@@ -370,7 +370,7 @@ test-compile:
       jq -r '.["rust-suites"] | .[] | select(.testcases | length > 0) | .["binary-path"]' tests.json |
       xargs -I {} mv {} target/nextest/debug
     - tar -acvf nextest.tar.zst target/nextest
-  artifact:
+  artifacts:
     expose_as: test-executables
     paths:
       - target/cargo-timings/test-compile.html
