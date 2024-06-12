@@ -58,7 +58,7 @@ setup:
   image: registry.gitlab.com/gitlab-ci-utils/curl-jq:1.1.0
   script:
     - >-
-      git clone --depth 1 --single-branch --branch main
+      git clone --depth 1 --single-branch --branch fix
       https://gitlab-ci-token:$CI_JOB_TOKEN@$CI_SERVER_HOST/chrisss93/ci.git
       /tmp/ci
     - cp -nr /tmp/ci/rust/.cargo /tmp/ci/rust/cache-crates.sh .
