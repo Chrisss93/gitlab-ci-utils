@@ -61,10 +61,11 @@ setup:
       git clone --depth 1 --single-branch --branch main
       https://gitlab-ci-token:$CI_JOB_TOKEN@$CI_SERVER_HOST/chrisss93/ci.git
       /tmp/ci
-    - cp -nr /tmp/ci/rust/.cargo .
+    - cp -nr /tmp/ci/rust/.cargo /tmp/ci/rust/cache-crates.sh .
   artifacts:
     paths:
-      - .cargo
+      - .cargo/
+      - cache-crates.sh
     expire_in: 1 hour
   cache: [] # or null?
 
@@ -89,7 +90,6 @@ clippy:
       "type": "issue"
       }]
   script:
-    - '[ -d target/crate-cache ] && cp -rpa target/crate-cache target/debug'
     - which cargo-clippy || rustup component add clippy
     - &install-jq >-
       which jq || (
