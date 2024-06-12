@@ -406,6 +406,7 @@ unit-tests:
       - target/prof/$CI_JOB_NAME.profraw
     expire_in: 1 day
   needs:
+    - setup
     - test-compile
 
 
