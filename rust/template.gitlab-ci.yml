@@ -72,7 +72,7 @@ setup:
 clippy:
   stage: check
   variables:
-    CLIPPY_ARGS: --all-targets --all-features --locked --no-deps --timings
+    CLIPPY_ARGS: --all-targets --all-features --locked --no-deps
     CODE_CLIMATE: |-
       [.[].message | select(.code != null) | . as $$msg | .spans[] | {
       "location": {"path": .file_name , "lines": {"begin": .line_start, "end": .line_end}},
@@ -96,22 +96,24 @@ clippy:
       wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O $CI_PROJECT_DIR/jq &&
       chmod +x $CI_PROJECT_DIR/jq && ln -s $CI_PROJECT_DIR/jq /usr/local/bin/jq
       )
-    - cargo clippy $CLIPPY_ARGS --message-format json | jq -s "$CODE_CLIMATE" > clippy.json
+    - ./cache-crates.sh load target/release target/crate-release-cache
+    - cargo clippy $CLIPPY_ARGS --message-format json --release | jq -s "$CODE_CLIMATE" > clippy.json
     - >-
       if [ -s clippy.json ] && jq -e 'length > 0' clippy.json;
-      then cargo clippy $CLIPPY_ARGS --color always && exit 222;
+      then cargo clippy $CLIPPY_ARGS --color always --release && exit 222;
       fi
   artifacts:
     when: always
     reports:
       codequality: clippy.json
-    paths:
-      - target/debug/cargo-timings/cargo-timing.html
   allow_failure:
     exit_codes:
       - 222
   cache: 
     - *cargo-registry-cache
+    - key: $CI_PROJECT_PATH-release-cache-compile:linux-gnu
+      paths:
+        - $CI_PROJECT_DIR/target/crate-release-cache
 
 
 rustfmt:
