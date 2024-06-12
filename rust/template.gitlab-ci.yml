@@ -114,6 +114,7 @@ clippy:
     - key: $CI_PROJECT_PATH-release-cache-compile:linux-gnu
       paths:
         - $CI_PROJECT_DIR/target/crate-release-cache
+      policy: pull
 
 
 rustfmt:
@@ -426,7 +427,7 @@ coverage:
     - *install-jq
     - which cargo-llvm-cov || cargo binstall -y cargo-llvm-cov@0.6.9
     - mv target/prof target/llvm-cov-target
-    - tar -xzvf nextest.tar.zst --strip-components 2 -C target/llvm-cov-target target/nextest/debug
+    - tar -axvf nextest.tar.zst --strip-components 2 -C target/llvm-cov-target target/nextest/debug
     - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --cobertura --output-path target/llvm-cov/report.xml
     - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --html --output-dir target/llvm-cov
     - cargo llvm-cov --ignore-filename-regex '/?main.rs' report
