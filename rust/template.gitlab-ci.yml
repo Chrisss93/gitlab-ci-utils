@@ -428,8 +428,8 @@ coverage:
     - which cargo-llvm-cov || cargo binstall -y cargo-llvm-cov@0.6.9
     - mv target/prof target/llvm-cov-target
     - tar -axvf nextest.tar.zst --strip-components 2 -C target/llvm-cov-target target/nextest/debug
-    - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --cobertura --output-path target/llvm-cov/report.xml
-    - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --html --output-dir target/llvm-cov
+    - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --cobertura --output-path target/llvm-cov-report.xml
+    - cargo llvm-cov --ignore-filename-regex '/?main.rs' report --html --output-dir target/llvm-cov-target
     - cargo llvm-cov --ignore-filename-regex '/?main.rs' report
     - >-
       cargo llvm-cov --ignore-filename-regex '/?main.rs' report --json |
@@ -440,10 +440,10 @@ coverage:
     reports:
       coverage_report:
         coverage_format: cobertura
-        path: target/llvm-cov/report.xml
+        path: target/llvm-cov-report.xml
     expose_as: report
     paths:
-      - target/llvm-cov/html/
+      - target/llvm-cov-target/html/
   needs:
     - test-compile
     - unit-tests
@@ -625,7 +625,7 @@ pages:
     - *binstall
     - which cargo-about || cargo binstall -y cargo-about@0.6.1
     # - which mdbook || cargo binstall -y mdbook@0.4.35
-    - which tree || apt-get update && apt-get-install -y --no-install-recommends tree
+    # - which tree || apt-get update && apt-get-install -y --no-install-recommends tree
   script:
     - 'echo "Creating gitlab release: ${CI_COMMIT_TAG#v}"'
     - mkdir -p public
@@ -648,7 +648,7 @@ pages:
     - echo "Setting up Pages"
     - mv target/doc public/docs
     - mv target/cargo-timings public/build-times
-    - mv target/llvm-cov/html public/test-coverage
+    - mv target/llvm-cov-target/html public/test-coverage
     - 'cp public/build-times/$(rustc -vV | grep -oP "(?<=host: ).*").html public/build-time.html'
     - >-
       sed "
