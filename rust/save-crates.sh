@@ -90,10 +90,13 @@ if [ -f "$json_diagnostic" ]; then
         flatten | unique | sort
 EOF
     )
+    ver=$(cargo --version | awk '/^cargo .+ \(.+\)$/ { print $2 }')
+    jq -r -s --arg v "$ver" --argjson deps "$deps" -f /dev/stdin "$json_diagnostic" > result.txt << 'EOF'
 
-    jq -r -s --argjson deps "$deps" -f /dev/stdin "$json_diagnostic" > result.txt << 'EOF'
+($v | split(".") | map(tonumber)) as $version |
+(if $version[0] == 1 and $version[1] >= 77 then ".+#(?<x>.+)@.+" else "(?<x>.+) .+ \\(.+\\)" end) as $pattern |
 map(select(.package_id as $id | any($deps[]; . == $id)) |
-    (.package_id | sub(".+#(?<x>.+)@.+"; "\(.x)")) as $crate_proper |
+    (.package_id | sub($pattern; "\(.x)")) as $crate_proper |
     [.filenames[]?, .out_dir?] | map(select(. != null) | 
         if contains("/build/") then [ sub("(?<prefix>/.+)/build/(?<artifact>.+?)/.+";
             "\(.prefix)/build/\(.artifact)",
@@ -104,6 +107,7 @@ map(select(.package_id as $id | any($deps[]; . == $id)) |
             "\(.prefix)/deps/\(.crate)-\(.hash).d",
             "\(.prefix)/.fingerprint/\($crate_proper)-\(.hash)"
         )]
+        else []
         end
     )
 ) | flatten | unique | .[]
