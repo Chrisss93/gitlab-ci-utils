@@ -235,8 +235,6 @@ unit-tests:
 
 coverage:
   stage: build
-  rules:
-    - exists: [cover/*.cov]
   variables:
     GO_COV_REPORT_URL: https://github.com/matm/gocov-html/releases/download
   before_script:
@@ -266,6 +264,7 @@ coverage:
     - cat coverage.json | gocov report
   coverage: '/^Total Coverage: [1-9]\d*(?:\.\d+)?% \(\d+/\d+\)$/'
   artifacts:
+    expose_as: report
     paths:
       - coverage.html
     reports:

@@ -73,6 +73,7 @@ clippy:
   stage: check
   variables:
     CLIPPY_ARGS: --all-targets --all-features --locked --no-deps
+    CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
     CODE_CLIMATE: |-
       [.[].message | select(.code != null) | . as $$msg | .spans[] | {
       "location": {"path": .file_name , "lines": {"begin": .line_start, "end": .line_end}},
@@ -96,11 +97,11 @@ clippy:
       wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O $CI_PROJECT_DIR/jq &&
       chmod +x $CI_PROJECT_DIR/jq && ln -s $CI_PROJECT_DIR/jq /usr/local/bin/jq
       )
-    - ./cache-crates.sh load target/release target/crate-release-cache
-    - cargo clippy $CLIPPY_ARGS --message-format json --release | jq -s "$CODE_CLIMATE" > clippy.json
+    - mkdir -p target && mv target/crate-release-cache/* target
+    - cargo clippy $CLIPPY_ARGS --release --message-format json | jq -s "$CODE_CLIMATE" > clippy.json
     - >-
       if [ -s clippy.json ] && jq -e 'length > 0' clippy.json;
-      then cargo clippy $CLIPPY_ARGS --color always --release && exit 222;
+      then cargo clippy $CLIPPY_ARGS --release --color always && exit 222;
       fi
   artifacts:
     when: always
@@ -340,14 +341,11 @@ test-compile:
   stage: test
   variables:
     CRATES: $TEST_CACHE_CRATES
-    CACHE_FROM: target/llvm-cov-target/debug
-    CACHE_TO: target/crate-test-cache
-    TREE_FLAG: dev,normal
   script:
     - *install-jq
     - which cargo-nextest || cargo binstall -y cargo-nextest@0.9.70
     # Load specific pre-compiled dependencies from a gitlab cache
-    - ./cache-crates.sh load target/debug target/crate-test-cache
+    - mkdir -p target && mv target/crate-test-cache/* target
     # Compile instrumented test binaries
     - export RUSTFLAGS='-C instrument-coverage --cfg=coverage --cfg=trybuild_no_target'
     - export LLVM_PROFILE_FILE=target/debug/%p-%m.profraw
@@ -356,7 +354,8 @@ test-compile:
       --timings > tests.json
     - mv target/cargo-timings/cargo-timing.html target/cargo-timings/test-compile.html
     # Save specific pre-compiled dependencies to a gitlab cache
-    - ./cache-crates.sh save target/debug target/crate-test-cache dev,normal $CRATES
+    - cargo test --no-run --message-format json-render-diagnostics > diagnostics.json
+    - ./save-crates.sh -j diagnostics.json target/crate-test-cache $CRATES
     # Prepare minimal nextest-archive
     - mkdir -p target/nextest/debug
     - >-
@@ -456,26 +455,23 @@ compile:linux-gnu:
   variables:
     CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
     CRATES: $RELEASE_CACHE_CRATES
-    CACHE_FROM: target/release
-    CACHE_TO: target/crate-release-cache
-    TREE_FLAG: normal
-  rules:
-    - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-    - when: manual
   script:
+    - *install-jq
     - >-
       cargo metadata --format-version 1 --no-deps |
       jq -e '.packages[].targets[] | select(.kind | contains(["bin"]))' ||
       (echo "No binaries to build" && exit 0)
-    - ./cache-crates.sh load target/$CARGO_BUILD_TARGET/release target/crate-release-cache
-    - cargo build --release --locked --timings
-    - ./cache-crates.sh save target/$CARGO_BUILD_TARGET/release target/crate-release-cache normal $CRATES
+    # Load specific pre-compiled dependencies from a gitlab cache
+    - mkdir -p target && mv target/crate-release-cache/* target
+    - cargo build --release --locked --timings --message-format json-render-diagnostics > diagnostics.json
     - mv target/cargo-timings/cargo-timing.html target/cargo-timings/$CARGO_BUILD_TARGET.html
+    # Save specific pre-compiled dependencies to a gitlab cache
+    - ./save-crates.sh -j diagnostics.json -t $CARGO_BUILD_TARGET target/crate-release-cache $CRATES
     - mkdir -p binaries
     - >-
       cargo metadata --format-version 1 --no-deps |
       jq -r ".packages[].targets[] | select(.kind | contains([\"bin\"])) |
-        \"target/$CARGO _BUILD_TARGET/release/\" + .name" |
+        \"target/$CARGO_BUILD_TARGET/release/\" + .name" |
       tar czvf binaries/$CARGO_BUILD_TARGET.tar.gz -T -
   after_script:
     # Upload binary to package registry if the pipeline was triggered by a git tag
@@ -527,7 +523,7 @@ compile:linux-gnu:
     RUSTFLAGS: -C linker=x86_64-w64-mingw32-gcc -C ar=/usr/x86_64-w64-mingw32/bin/ar
   script:
     - !reference [compile:linux-gnu, script]
-    - rm -f binaries/$CARGO_BUILD_TARGET.tar.gz
+    - rm binaries/$CARGO_BUILD_TARGET.tar.gz
     - >-
       cargo metadata --format-version 1 --no-deps |
       jq -r ".packages[].targets[] | select(.kind | contains([\"bin\"])) |
@@ -536,16 +532,16 @@ compile:linux-gnu:
 
 
 # Maybe write this around criterion/iai? (or else rust nightly may be required...)
+# --all-targets might accidentally call the unit-tests, need to check.
 .benchmark:
   stage: build
   rules:
     - if: $CI_COMMIT_TAG || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - when: manual
   variables:
+    CRATES: $TEST_CACHE_CRATES
+    CARGO_ARGS: --locked --verbose --all-targets --all-features
     # JQ_EXPR: |-
-    CRATES: $RELEASE_CACHE_CRATES
-    CACHE_FROM: target/release
-    CACHE_TO: target/crate-release-cache
   script:
     - *install-jq
     - >-
@@ -555,12 +551,12 @@ compile:linux-gnu:
     - *binstall
     - # Test if using iai-callgrind for benching and if so, binstall the iai-callgrind-runner
       # cargo binstall -y iai-callgrind-runner@0.11.0
-    - ./cache-crates.sh load target/release target/crate-bench-cache
+    - mkdir -p target && mv target/crate-bench-cache/* target
     # Maybe do something about the baselines
-    - >-
-      cargo bench --locked --verbose --all-targets --all-features --  --output-format json
-      jq -s $JQ_EXPR > benchmarks.json
-    - ./cache-crates.sh save target/release target/crate-bench-cache normal $CRATES
+    - cargo bench $CARGO_ARGS -- --output-format json | jq -s $JQ_EXPR > benchmarks.json
+    # Save specific pre-compiled dependencies to a gitlab cache
+    - cargo bench $CARGO_ARGS --no-run --message-format json-render-diagnostics > diagnostics.json
+    - ./save-crates.sh -j diagnostics.json target/crate-bench-cache $CRATES
   artifacts:
     reports:
       # load_performance: benchmarks.json # deprecated in 17.0

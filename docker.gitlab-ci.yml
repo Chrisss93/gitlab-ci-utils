@@ -55,9 +55,9 @@ docker-image:
 
 
 # To cleanup docker images in registries other than gitlab, one can override this job and modify the before_script
-# to define a custom way to retrieve and set the "TOKEN" environment variable necessary to authenticate with the
-# chosen docker registry. If the chosen registry has a static hard-coded authentication token, just add it to the
-# variables clause in this job.
+# to define a custom way to retrieve and set the "DOCKER_REGISTRY_TOKEN" environment variable necessary to
+# authenticate with the chosen docker registry. If the chosen registry has a static hard-coded authentication token,
+# just add it to the variables clause in this job.
 cleanup:
   stage: .post
   image: registry.gitlab.com/gitlab-ci-utils/curl-jq:1.1.0
@@ -75,7 +75,7 @@ cleanup:
   allow_failure: true
   before_script:
     - >-
-      [ -n "$TOKEN" ] || TOKEN=$(
+      [ -n "$DOCKER_REGISTRY_TOKEN" ] || DOCKER_REGISTRY_TOKEN=$(
       curl -L -u $CI_REGISTRY_USER:$CI_REGISTRY_PASSWORD
       $CI_SERVER_URL/jwt/auth?service=container_registry&scope=repository:${CI_REGISTRY_IMAGE#*/}:pull,delete |
       jq -r '.token')
@@ -87,7 +87,7 @@ cleanup:
       manifest=$(
       curl -L -I
       -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json'
-      -H "Authorization: Bearer $TOKEN"
+      -H "Authorization: Bearer $DOCKER_REGISTRY_TOKEN"
       https://$img_repo/v2/$img_name/manifests/$img_tag |
       awk 'tolower($1) == "docker-content-digest:" { print $2 }'
       )
@@ -95,13 +95,13 @@ cleanup:
     # Try Docker Registry V2 Spec API
     - >-
       curl -L --fail-with-body -X DELETE
-      -H "Authorization: Bearer $TOKEN"
+      -H "Authorization: Bearer $DOCKER_REGISTRY_TOKEN"
       https://$img_repo/v2/$img_name/manifests/$manifest && exit 0
 
     # Try custom Gitlab Container Registry endpoint
     - >-
       curl -L --fail-with-body -X DELETE
-      -H "Authorization: Bearer $TOKEN"
+      -H "Authorization: Bearer $DOCKER_REGISTRY_TOKEN"
       -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json'
       https://$img_repo/v2/$img_name/tags/reference/$img_tag && exit 0
 
