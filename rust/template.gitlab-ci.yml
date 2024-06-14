@@ -97,7 +97,7 @@ clippy:
       wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O $CI_PROJECT_DIR/jq &&
       chmod +x $CI_PROJECT_DIR/jq && ln -s $CI_PROJECT_DIR/jq /usr/local/bin/jq
       )
-    - mkdir -p target && mv target/crate-release-cache/* target
+    - '[ -d "target/crate-rease-cache" ] && (mkdir -p target && mv target/crate-release-cache/* target)'
     - cargo clippy $CLIPPY_ARGS --release --message-format json | jq -s "$CODE_CLIMATE" > clippy.json
     - >-
       if [ -s clippy.json ] && jq -e 'length > 0' clippy.json;
@@ -345,7 +345,7 @@ test-compile:
     - *install-jq
     - which cargo-nextest || cargo binstall -y cargo-nextest@0.9.70
     # Load specific pre-compiled dependencies from a gitlab cache
-    - mkdir -p target && mv target/crate-test-cache/* target
+    - '[ -d "target/crate-test-cache" ] && (mkdir -p target && mv target/crate-test-cache/* target)'
     # Compile instrumented test binaries
     - export RUSTFLAGS='-C instrument-coverage --cfg=coverage --cfg=trybuild_no_target'
     - export LLVM_PROFILE_FILE=target/debug/%p-%m.profraw
@@ -462,7 +462,7 @@ compile:linux-gnu:
       jq -e '.packages[].targets[] | select(.kind | contains(["bin"]))' ||
       (echo "No binaries to build" && exit 0)
     # Load specific pre-compiled dependencies from a gitlab cache
-    - mkdir -p target && mv target/crate-release-cache/* target
+    - '[ -d "target/crate-release-cache" ] && (mkdir -p target && mv target/crate-release-cache/* target)'
     - cargo build --release --locked --timings --message-format json-render-diagnostics > diagnostics.json
     - mv target/cargo-timings/cargo-timing.html target/cargo-timings/$CARGO_BUILD_TARGET.html
     # Save specific pre-compiled dependencies to a gitlab cache
@@ -551,7 +551,7 @@ compile:linux-gnu:
     - *binstall
     - # Test if using iai-callgrind for benching and if so, binstall the iai-callgrind-runner
       # cargo binstall -y iai-callgrind-runner@0.11.0
-    - mkdir -p target && mv target/crate-bench-cache/* target
+    - '[ -d "target/crate-bench-cache" ] && (mkdir -p target && mv target/crate-bench-cache/* target)'
     # Maybe do something about the baselines
     - cargo bench $CARGO_ARGS -- --output-format json | jq -s $JQ_EXPR > benchmarks.json
     # Save specific pre-compiled dependencies to a gitlab cache
