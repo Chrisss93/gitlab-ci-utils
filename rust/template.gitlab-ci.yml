@@ -97,7 +97,7 @@ clippy:
       wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O $CI_PROJECT_DIR/jq &&
       chmod +x $CI_PROJECT_DIR/jq && ln -s $CI_PROJECT_DIR/jq /usr/local/bin/jq
       )
-    - '[ -d "target/crate-rease-cache" ] && (mkdir -p target && mv target/crate-release-cache/* target)'
+    - '[ -d "target/crate-release-cache" ] && (mkdir -p target && mv target/crate-release-cache/* target)'
     - cargo clippy $CLIPPY_ARGS --release --message-format json | jq -s "$CODE_CLIMATE" > clippy.json
     - >-
       if [ -s clippy.json ] && jq -e 'length > 0' clippy.json;
