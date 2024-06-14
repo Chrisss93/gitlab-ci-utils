@@ -61,11 +61,11 @@ setup:
       git clone --depth 1 --single-branch --branch fix
       https://gitlab-ci-token:$CI_JOB_TOKEN@$CI_SERVER_HOST/chrisss93/ci.git
       /tmp/ci
-    - cp -nr /tmp/ci/rust/.cargo /tmp/ci/rust/cache-crates.sh .
+    - cp -nr /tmp/ci/rust/.cargo /tmp/ci/rust/save-crates.sh .
   artifacts:
     paths:
       - .cargo/
-      - cache-crates.sh
+      - save-crates.sh
     expire_in: 1 hour
   cache: [] # or null?
 
