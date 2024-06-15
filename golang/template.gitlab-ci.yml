@@ -13,6 +13,7 @@ default:
   image: $JOB_IMAGE
   cache:
     key: $CI_PROJECT_PATH-go-deps
+    unprotect: true
     paths:
       - $GOPATH/pkg/mod/cache
 
