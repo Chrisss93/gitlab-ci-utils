@@ -224,6 +224,7 @@ unit-tests:
       go test -list '.*' -tags $BUILD_TAG ./... | grep -Ev '^(ok|\?)\s+' | sort > tagged.txt
       SKIP=$(comm -23 tagged.txt untagged.txt | tr '\n' '/')
       fi
+    - mkdir -p cover
     - go test -tags "$BUILD_TAG" -skip "$SKIP" -coverprofile cover/${CI_JOB_NAME}.cov -v ./... | tee test.txt
     - go-junit-report --set-exit-code --in test.txt > junit.xml
   artifacts:
