@@ -92,9 +92,9 @@ govulncheck:
     SCANNER: >-
       {"id": "govulncheck", "name": "govulncheck", "version": "1.1.0", "vendor": {"name": "gosec"},
       "url": "https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck"}
-    # https://gitlab.com/gitlab-org/security-products/security-report-schemas/-/blob/v15.0.6/dist/dependency-scanning-report-format.json
+    # https://gitlab.com/gitlab-org/security-products/security-report-schemas/-/blob/v15.1.3/dist/dependency-scanning-report-format.json
     DEP_SCAN: >-
-      map(select(.osv?).osv) as $all_osvs | {
+      map(select(.osv?).osv) as $$all_osvs | {
       "version": "v15.1.3",
       "vulnerabilities": map(select(.finding? and .finding.trace?) | .finding) |
         group_by([.osv, .trace[0].module]) |
@@ -102,7 +102,7 @@ govulncheck:
           "id": .[0].osv, "fixed": .[0].fixed_version, "pkg": .[0].trace[0].module, "version": .[0].trace[0].version,
           "called": map(any(.trace[]; .module == $$MODULE)) | any
         }) |
-        map( .id as $$id | ($all_osvs | map(select(.id == $$id)) | first) as $$osv | {
+        map( .id as $$id | ($$all_osvs | map(select(.id == $$id)) | first) as $$osv | {
           "id": (.id + .pkg) | @base64,
           "name": .id,
           "description": $$osv.summary,
