@@ -70,55 +70,59 @@ golangci-lint:
     paths:
       - $GOPATH/bin
 
-# govulncheck is able to go beyond most analyzers and detect not only if a vulnerable dependency is being imported,
-# but also if the specific code-path to the vulnerability is being used. If there are no code-paths to that
-# vulnerability, it is considered Low severity and will not be noted in the code-quality report.
+
 govulncheck:
   stage: check
   variables:
-    CODE_CLIMATE: |-
-      map(select(.vulnerability != null) | .vulnerability | .osv as $$osv | .modules[] |
-      .packages[0].callstacks[0].frames[0].position as $$pos | select($$pos != null) | [{
-      "location": {"path": $$pos.filename, "lines": {"begin": $$pos.line, "end": $$pos.line}},
-      "description": "Detected vulnerability \($$osv.id) for \(.path)@\(.found_version): \($$osv.details)",
-      "fingerprint": ($$osv.id + $$pos.filename + ($$pos.line | tostring)) | @base64,
-      "check_name": "govulncheck",
-      "severity": "blocker",
-      "categories": ["Security"],
-      "type": "issue"
-      }]) | flatten
+    CODE_CLIMATE: >-
+      map(select(.finding? | any(.trace[]?; .module == $$MODULE)) | .finding |
+        (.trace[] | select(.module == $$MODULE)) as $$call | {
+        "description":
+          "Vulnerability \(.osv) in: \(.trace[0].package) \(.trace[0].version) (fixed in: \(.fixed_version?))",
+        "check_name": .osv,
+        "location": $$call.position | {"path": .filename, "lines": {"begin": .line, "end": .line}},
+        "fingerprint": (
+          .osv + $$call.function + $$call.package + $$call.position.filename +
+          ($$call.position.line | tostring) + ($$call.position.offset | tostring)
+        ) | @base64,
+        "severity": "blocker",
+        "categories": ["Security"],
+        "type": "issue"
+      }) | unique
     SCANNER: >-
-      {"id": "govulncheck", "name": "govulncheck", "version": "1.0.1", "vendor": {"name": "golang"},
+      {"id": "govulncheck", "name": "govulncheck", "version": "1.1.0", "vendor": {"name": "gosec"},
       "url": "https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck"}
     # https://gitlab.com/gitlab-org/security-products/security-report-schemas/-/blob/v15.0.6/dist/dependency-scanning-report-format.json
-    DEP_SCAN: |-
-      {
-        "version": "15.0.6",
-        "vulnerabilities": map(select(.vulnerability != null) | .vulnerability | .osv as $$osv | .modules[] | {
-          "id": ($$osv.id + .path + .found_version) | @base64,
-          "name": ($$osv.id + .path + .found_version),
-          "description": "Detected vulnerability \($$osv.id) for \(.path)@\(.found_version): \($$osv.details)",
-          "severity": (if .package.callstacks == null then "Low" else "Critical" end),
-          "location": {"file": "go.mod", "dependency": {"version": .found_version, "package": {"name": .path}}},
-          "solution": $$osv.affected | map(.package.name as $$pkg | .ranges[].events[] |
-            if first(.fixed | select(. != null)) != null then "upgrade \($$pkg) to \(.fixed)"
-            elif first(.introduced | select(. != null)) != "0" then "downgrade \($$pkg) to \(.introduced)"
-            else "remove \($$pkg)" end) | join(" and "),
-          "identifiers": ($$osv.aliases + [$$osv.id] | map({
-            "name": ., "value": .,
+    DEP_SCAN: >-
+      map(select(.osv?).osv) as $all_osvs | {
+      "version": "v15.1.3",
+      "vulnerabilities": map(select(.finding? and .finding.trace?) | .finding) |
+        group_by([.osv, .trace[0].module]) |
+        map({
+          "id": .[0].osv, "fixed": .[0].fixed_version, "pkg": .[0].trace[0].module, "version": .[0].trace[0].version,
+          "called": map(any(.trace[]; .module == $$MODULE)) | any
+        }) |
+        map( .id as $$id | ($all_osvs | map(select(.id == $$id)) | first) as $$osv | {
+          "id": (.id + .pkg) | @base64,
+          "name": .id,
+          "description": $$osv.summary,
+          "details": $$osv.details,
+          "solution": "Update \(.pkg) to \(.fixed)",
+          "severity": (if .called then "Critical" else "Low" end),
+          "location": {"file": "go.mod", "dependency": {"package": {"name": .pkg}, "version": .version}},
+          "links": ($$osv.references | map({"name": .type, "url": .url})),
+          "identifiers": ($$osv.aliases + [.id] | map({
+            "name": .,
+            "value": .,
             "type": . | sub("-.+"; "") | ascii_downcase,
-            "url": (. | 
+            "url": (
               if startswith("GO-") then "https://pkg.go.dev/vuln/\(.)"
               elif startswith("CVE-") then "https://www.cve.org/CVERecord?id=\(.)"
               elif startswith("GHSA-") then "https://github.com/advisories/\(.)"
-              else null end)
+              else null end
+            )
           }))
         }),
-        "dependency_files": [{
-          "path": "go.mod", "package_manager": "go modules",
-          "dependencies": map(select(.vulnerability != null) | .vulnerability.modules[] | 
-            {"package": {"name": .path}, "version": .found_version})
-        }],
         "scan": {
           "type": "dependency_scanning",
           "status": "success",
@@ -137,17 +141,14 @@ govulncheck:
     - which jq || apk add --no-cache jq
   script:
     - govulncheck -json -test ./... > raw.json
-    - jq -s "$CODE_CLIMATE" raw.json > govulncheck.json
-    # - jq -s "$DEP_SCAN" raw.json > govulncheck-scan.json
-    # - >-
-    #   [ -s govulncheck-scan.json ] && jq -e ".vulnerabilities | length > 0" govulncheck-scan.json &&
-    #   govulncheck -test ./...
+    - jq -s --arg MODULE $(go list -m) "$CODE_CLIMATE" raw.json > govulncheck.json
+    - jq -s --arg MODULE $(go list -m) "$DEP_SCAN" raw.json > govulncheck-scan.json
     - '[ -s govulncheck.json ] && jq -e "length > 0" govulncheck.json && govulncheck -test ./...'
   artifacts:
     when: always
     reports:
       codequality: govulncheck.json
-      # dependency_scanning: govulncheck-scan.json
+      dependency_scanning: govulncheck-scan.json
   allow_failure:
     exit_codes: [3]
   cache: *go-bin-cache
