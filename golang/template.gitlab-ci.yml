@@ -76,7 +76,7 @@ govulncheck:
   variables:
     CODE_CLIMATE: >-
       map(select(.finding? | any(.trace[]?; .module == $$MODULE)) | .finding |
-        (.trace[] | select(.module == $$MODULE)) as $$call | {
+        (.trace | map(select(.module == $$MODULE and (.package | endswith(".test") | not))) | last) as $$call | {
         "description":
           "Vulnerability \(.osv) in: \(.trace[0].package) \(.trace[0].version) (fixed in: \(.fixed_version?))",
         "check_name": .osv,
